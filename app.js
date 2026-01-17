@@ -1,8 +1,10 @@
 const chatLog = document.getElementById("chatLog");
 const apiKeyInput = document.getElementById("apiKey");
 const modelInput = document.getElementById("model");
-const modelPill = document.getElementById("modelPill");
+const modelSwitcher = document.getElementById("modelSwitcher");
 const reasoningSelect = document.getElementById("reasoningEffort");
+const composerModel = document.getElementById("composerModel");
+const composerReasoning = document.getElementById("composerReasoning");
 const systemPromptInput = document.getElementById("systemPrompt");
 const rememberKeyInput = document.getElementById("rememberKey");
 const messageInput = document.getElementById("messageInput");
@@ -21,8 +23,13 @@ const renameChatBtn = document.getElementById("renameChatBtn");
 const tokenPill = document.getElementById("tokenPill");
 const timerEl = document.getElementById("timer");
 const settingsPanel = document.getElementById("settingsPanel");
-const sidebarResizer = document.getElementById("sidebarResizer");
 const sidebar = document.querySelector(".sidebar");
+const wideScreenToggle = document.getElementById("wideScreenToggle");
+const resizeHandle = document.getElementById("resizeHandle");
+const composer = document.querySelector(".composer");
+const sidebarToggle = document.getElementById("sidebarToggle");
+const fontSizeRange = document.getElementById("fontSizeRange");
+const fontSizeValue = document.getElementById("fontSizeValue");
 
 const STORAGE_KEY = "keychat.apiKey";
 const MODEL_KEY = "keychat.model";
@@ -31,7 +38,10 @@ const REASONING_KEY = "keychat.reasoning";
 const THEME_KEY = "keychat.theme";
 const SESSIONS_KEY = "keychat.sessions";
 const ACTIVE_SESSION_KEY = "keychat.activeSession";
-const SETTINGS_HEIGHT_KEY = "keychat.settingsHeight";
+const WIDE_SCREEN_KEY = "keychat.wideScreen";
+const COMPOSER_HEIGHT_KEY = "keychat.composerHeight";
+const SIDEBAR_COLLAPSED_KEY = "keychat.sidebarCollapsed";
+const FONT_SIZE_KEY = "keychat.fontSize";
 const OPFS_FILE_NAME = "weichat-history.json";
 
 const HLJS_THEMES = {
@@ -58,6 +68,7 @@ function setStatus(text) {
 }
 
 function ensureModelOption(value) {
+  if (!modelInput) return;
   const existing = Array.from(modelInput.options).some((opt) => opt.value === value);
   if (!existing && value) {
     const option = document.createElement("option");
@@ -68,7 +79,18 @@ function ensureModelOption(value) {
 }
 
 function updateModelPill() {
-  modelPill.textContent = modelInput.value.trim() || "gpt-5.2";
+  // No longer needed - model is shown in composer
+}
+
+function ensureModelSwitcherOption(value) {
+  if (!modelSwitcher) return;
+  const exists = Array.from(modelSwitcher.options).some((opt) => opt.value === value);
+  if (!exists && value) {
+    const option = document.createElement("option");
+    option.value = value;
+    option.textContent = value;
+    modelSwitcher.appendChild(option);
+  }
 }
 
 function supportsOpfs() {
@@ -199,135 +221,49 @@ function stopTimer() {
   timerStart = null;
 }
 
-function clampSettingsHeight(value) {
-  const minHeight = 220;
-  const minChats = 200;
-  const sidebarHeight = sidebar ? sidebar.clientHeight : 0;
-  const maxHeight = sidebarHeight ? Math.max(minHeight, sidebarHeight - minChats) : value;
-  return Math.min(Math.max(value, minHeight), maxHeight);
-}
-
-function setSettingsHeight(value, { persist = true } = {}) {
-  if (!settingsPanel || Number.isNaN(value)) {
-    return;
-  }
-  const clamped = clampSettingsHeight(value);
-  document.documentElement.style.setProperty("--settings-height", `${clamped}px`);
-  if (persist) {
-    localStorage.setItem(SETTINGS_HEIGHT_KEY, String(clamped));
-  }
-}
-
-function initSidebarResize() {
-  if (!settingsPanel || !sidebarResizer) {
-    return;
-  }
-
-  let startY = 0;
-  let startHeight = 0;
-  let activePointerId = null;
-
-  const onPointerDown = (event) => {
-    if (event.button !== 0) {
-      return;
-    }
-    activePointerId = event.pointerId;
-    sidebarResizer.setPointerCapture(activePointerId);
-    startY = event.clientY;
-    startHeight = settingsPanel.getBoundingClientRect().height;
-    document.body.classList.add("resizing");
-    sidebarResizer.classList.add("dragging");
-  };
-
-  const onPointerMove = (event) => {
-    if (activePointerId === null) {
-      return;
-    }
-    const delta = event.clientY - startY;
-    setSettingsHeight(startHeight + delta, { persist: false });
-  };
-
-  const onPointerUp = () => {
-    if (activePointerId === null) {
-      return;
-    }
-    try {
-      sidebarResizer.releasePointerCapture(activePointerId);
-    } catch (error) {
-      // Ignore if capture was not set.
-    }
-    activePointerId = null;
-    setSettingsHeight(settingsPanel.getBoundingClientRect().height);
-    document.body.classList.remove("resizing");
-    sidebarResizer.classList.remove("dragging");
-  };
-
-  sidebarResizer.addEventListener("pointerdown", onPointerDown);
-  sidebarResizer.addEventListener("pointermove", onPointerMove);
-  sidebarResizer.addEventListener("pointerup", onPointerUp);
-  sidebarResizer.addEventListener("pointercancel", onPointerUp);
-}
-
 function updateControls() {
   const busy = state.sending || state.loadingAttachments > 0;
   sendBtn.disabled = busy;
   messageInput.disabled = state.sending;
   fileInput.disabled = state.sending;
   apiKeyInput.disabled = state.sending;
-  modelInput.disabled = state.sending;
-  reasoningSelect.disabled = state.sending;
+  if (modelInput) modelInput.disabled = state.sending;
+  if (reasoningSelect) reasoningSelect.disabled = state.sending;
+  if (composerModel) composerModel.disabled = state.sending;
+  if (composerReasoning) composerReasoning.disabled = state.sending;
   systemPromptInput.disabled = state.sending;
-  clearBtn.disabled = state.sending;
+  if (clearBtn) clearBtn.disabled = state.sending;
   newChatBtn.disabled = state.sending;
 }
 
 function createThinkingPanel() {
   const details = document.createElement("details");
   details.className = "thinking";
-  details.open = true;
+  details.open = false;
 
   const summary = document.createElement("summary");
-  summary.textContent = "Reasoning";
+  summary.innerHTML = '<span class="thinking-indicator"></span>Thinking';
 
   const body = document.createElement("div");
   body.className = "thinking-body";
 
-  const status = document.createElement("div");
-  status.className = "thinking-status";
-
-  const summaryWrap = document.createElement("div");
-  summaryWrap.className = "thinking-summary";
-  summaryWrap.hidden = true;
-
-  const summaryLabel = document.createElement("div");
-  summaryLabel.className = "thinking-label";
-  summaryLabel.textContent = "Summary";
-
   const summaryText = document.createElement("div");
   summaryText.className = "thinking-summary-text";
 
-  summaryWrap.appendChild(summaryLabel);
-  summaryWrap.appendChild(summaryText);
-  body.appendChild(status);
-  body.appendChild(summaryWrap);
+  body.appendChild(summaryText);
   details.appendChild(summary);
   details.appendChild(body);
 
   return {
     details,
-    status,
-    summaryWrap,
+    summary,
+    body,
     summaryText,
   };
 }
 
 function addThinkingLine(panel, text) {
-  if (!panel) {
-    return;
-  }
-  const line = document.createElement("div");
-  line.textContent = text;
-  panel.status.appendChild(line);
+  // No longer used - kept for compatibility
 }
 
 async function streamResponse(response, onEvent) {
@@ -507,14 +443,14 @@ function normalizeMath(text) {
   );
 
   // Wrap inline LaTeX inside parentheses when it contains commands.
-  output = output.replace(/\(([^()]*\\\\[^()]*)\)/g, (match, inner, offset, full) => {
+  output = output.replace(/\(([^()]*\\[a-zA-Z][^()]*)\)/g, (match, inner, offset, full) => {
     if (offset > 0 && full[offset - 1] === "\\") {
       return match;
     }
     if (match.includes("$") || match.includes("\\(") || match.includes("\\[")) {
       return match;
     }
-    return `\\(${match}\\)`;
+    return `\\(${inner}\\)`;
   });
 
   // Restore stashed code + math.
@@ -555,6 +491,34 @@ function renderMarkdownInto(el, text) {
       window.hljs.highlightElement(block);
     });
   }
+
+  // Add copy buttons to code blocks
+  el.querySelectorAll("pre").forEach((pre) => {
+    if (pre.parentElement?.classList.contains("code-block-wrapper")) return;
+
+    const wrapper = document.createElement("div");
+    wrapper.className = "code-block-wrapper";
+
+    const copyBtn = document.createElement("button");
+    copyBtn.className = "code-copy-btn";
+    copyBtn.textContent = "Copy";
+    copyBtn.type = "button";
+    copyBtn.addEventListener("click", async () => {
+      const code = pre.querySelector("code")?.textContent || pre.textContent;
+      try {
+        await navigator.clipboard.writeText(code);
+        copyBtn.textContent = "Copied!";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+      } catch (err) {
+        copyBtn.textContent = "Failed";
+        setTimeout(() => { copyBtn.textContent = "Copy"; }, 2000);
+      }
+    });
+
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+    wrapper.appendChild(copyBtn);
+  });
 
   if (window.renderMathInElement) {
     try {
@@ -1066,6 +1030,47 @@ function deriveTitleFromMessages(messages) {
   return "New chat";
 }
 
+async function generateChatTitle(userMessage, apiKey) {
+  if (!userMessage || !apiKey) {
+    return null;
+  }
+
+  try {
+    const response = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        input: [
+          {
+            role: "user",
+            content: `Generate a very short title (3-6 words max) for a chat that starts with this message. Return ONLY the title, no quotes or punctuation:\n\n${userMessage.slice(0, 500)}`,
+          },
+        ],
+      }),
+    });
+
+    if (!response.ok) {
+      return null;
+    }
+
+    const data = await response.json();
+    const outputText = data?.output?.[0]?.content?.[0]?.text ||
+      data?.output?.find?.(o => o.type === "message")?.content?.[0]?.text;
+
+    if (outputText) {
+      const title = outputText.trim().replace(/^["']|["']$/g, "").slice(0, 50);
+      return title || null;
+    }
+    return null;
+  } catch (error) {
+    return null;
+  }
+}
+
 function saveSessions() {
   try {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(state.sessions));
@@ -1264,8 +1269,8 @@ function deleteMessageAt(index) {
 
 async function sendAssistantResponse() {
   const apiKey = apiKeyInput.value.trim();
-  const model = modelInput.value.trim() || "gpt-5.2";
-  const reasoningEffort = reasoningSelect.value;
+  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const reasoningEffort = composerReasoning ? composerReasoning.value : "default";
 
   if (!apiKey) {
     setStatus("Add your API key to continue.");
@@ -1273,10 +1278,12 @@ async function sendAssistantResponse() {
     return;
   }
 
-  const pending = addMessage("assistant", "", { pending: true, thinking: true });
+  const reasoningEnabled = reasoningEffort && reasoningEffort !== "default" && reasoningEffort !== "none";
+  const pending = addMessage("assistant", "", { pending: true, thinking: reasoningEnabled });
   const thinkingPanel = pending.thinking;
   const thinkingNotes = new Set();
   let streamFinished = false;
+  const thinkingStartTime = Date.now();
   const addNote = (key, text) => {
     if (!thinkingPanel || thinkingNotes.has(key)) {
       return;
@@ -1289,7 +1296,13 @@ async function sendAssistantResponse() {
       return;
     }
     if (streamFinished) {
+      const elapsed = Math.round((Date.now() - thinkingStartTime) / 1000);
+      thinkingPanel.summary.innerHTML = `Thought for ${elapsed} second${elapsed !== 1 ? "s" : ""}`;
       thinkingPanel.details.open = false;
+      // Hide body if no content
+      if (!thinkingPanel.summaryText.textContent.trim()) {
+        thinkingPanel.body.style.display = "none";
+      }
     }
   };
 
@@ -1311,7 +1324,7 @@ async function sendAssistantResponse() {
     payload.instructions = systemPrompt;
   }
 
-  if (reasoningEffort && reasoningEffort !== "default") {
+  if (reasoningEffort && reasoningEffort !== "default" && reasoningEffort !== "none") {
     payload.reasoning = { effort: reasoningEffort };
   }
 
@@ -1370,13 +1383,27 @@ async function sendAssistantResponse() {
             addNote("progress", "Working");
             break;
           case "response.reasoning_text.delta":
-            addNote("reasoning", "Reasoning in progress");
+            if (thinkingPanel && event.delta) {
+              thinkingPanel.details.open = true;
+              thinkingPanel.summaryText.textContent += event.delta;
+            }
             break;
           case "response.reasoning_summary_text.delta":
-            addNote("summary", "Summarizing reasoning");
-            if (thinkingPanel) {
-              thinkingPanel.summaryWrap.hidden = false;
-              thinkingPanel.summaryText.textContent += event.delta || "";
+            if (thinkingPanel && event.delta) {
+              thinkingPanel.details.open = true;
+              // Clear reasoning text and show summary instead
+              if (!thinkingPanel.showingSummary) {
+                thinkingPanel.summaryText.textContent = "";
+                thinkingPanel.showingSummary = true;
+              }
+              thinkingPanel.summaryText.textContent += event.delta;
+            }
+            break;
+          case "response.reasoning_summary_part.added":
+          case "response.reasoning_summary_part.delta":
+            if (thinkingPanel && event.part?.text) {
+              thinkingPanel.details.open = true;
+              thinkingPanel.summaryText.textContent += event.part.text;
             }
             break;
           case "response.output_text.delta":
@@ -1413,6 +1440,10 @@ async function sendAssistantResponse() {
           case "error":
             throw new Error(event.error?.message || "Stream error.");
           default:
+            // Log unknown events for debugging
+            if (event.type && event.type.includes("reasoning")) {
+              console.log("Reasoning event:", event.type, event);
+            }
             break;
         }
       });
@@ -1519,10 +1550,11 @@ async function sendMessage() {
   ensureSession();
   rememberKeyIfNeeded();
 
-  const model = modelInput.value.trim() || "gpt-5.2";
+  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const reasoning = composerReasoning ? composerReasoning.value : "default";
   localStorage.setItem(MODEL_KEY, model);
   localStorage.setItem(SYSTEM_KEY, systemPromptInput.value);
-  localStorage.setItem(REASONING_KEY, reasoningSelect.value);
+  localStorage.setItem(REASONING_KEY, reasoning);
 
   messageInput.value = "";
   const attachments = state.attachments.slice();
@@ -1562,14 +1594,31 @@ async function sendMessage() {
   renderAttachmentList();
 
   const session = state.sessions.find((item) => item.id === state.activeSessionId);
+  const isFirstMessage = session && (!session.title || session.title === "New chat");
   if (session) {
-    if (!session.title || session.title === "New chat") {
+    if (isFirstMessage) {
       session.title = summarizeTitle(userText || "New chat");
     }
     session.messages = state.messages;
     updateSessionMetadata(session);
     saveSessions();
     renderChatList();
+  }
+
+  // Auto-generate chat title for first message
+  if (isFirstMessage && userText && session) {
+    const apiKey = apiKeyInput.value.trim();
+    const sessionId = session.id;
+    generateChatTitle(userText, apiKey).then((generatedTitle) => {
+      if (generatedTitle) {
+        const targetSession = state.sessions.find((s) => s.id === sessionId);
+        if (targetSession && targetSession.title !== generatedTitle) {
+          targetSession.title = generatedTitle;
+          saveSessions();
+          renderChatList();
+        }
+      }
+    });
   }
 
   await sendAssistantResponse();
@@ -1642,7 +1691,7 @@ async function initialize() {
     rememberKeyInput.checked = true;
   }
 
-  if (savedModel) {
+  if (savedModel && modelInput) {
     ensureModelOption(savedModel);
     modelInput.value = savedModel;
   }
@@ -1651,21 +1700,12 @@ async function initialize() {
     systemPromptInput.value = savedSystem;
   }
 
-  if (savedReasoning) {
+  if (savedReasoning && reasoningSelect) {
     reasoningSelect.value = savedReasoning;
   }
 
   themeSelect.value = savedTheme;
   applyTheme(savedTheme);
-
-  if (settingsPanel) {
-    const savedHeight = Number(localStorage.getItem(SETTINGS_HEIGHT_KEY));
-    if (Number.isFinite(savedHeight)) {
-      document.documentElement.style.setProperty("--settings-height", `${savedHeight}px`);
-    }
-  }
-
-  initSidebarResize();
 
   let loadedFromFile = false;
   const filePayload = await loadSessionsFromOpfs({ silent: true });
@@ -1734,7 +1774,9 @@ newChatBtn.addEventListener("click", () => {
   setStatus("Ready");
 });
 
-clearBtn.addEventListener("click", clearCurrentChat);
+if (clearBtn) {
+  clearBtn.addEventListener("click", clearCurrentChat);
+}
 
 fileInput.addEventListener("change", () => {
   const files = Array.from(fileInput.files || []);
@@ -1743,10 +1785,13 @@ fileInput.addEventListener("change", () => {
 });
 
 rememberKeyInput.addEventListener("change", rememberKeyIfNeeded);
-modelInput.addEventListener("change", () => {
-  updateModelPill();
-  localStorage.setItem(MODEL_KEY, modelInput.value);
-});
+
+if (modelInput) {
+  modelInput.addEventListener("change", () => {
+    updateModelPill();
+    localStorage.setItem(MODEL_KEY, modelInput.value);
+  });
+}
 
 themeSelect.addEventListener("change", (event) => {
   setTheme(event.target.value);
@@ -1767,14 +1812,6 @@ document.addEventListener("click", (event) => {
 });
 
 window.addEventListener("resize", hideChatContextMenu);
-
-window.addEventListener("resize", () => {
-  if (settingsPanel) {
-    setSettingsHeight(settingsPanel.getBoundingClientRect().height, { persist: false });
-  }
-});
-
-
 
 if (renameChatBtn) {
   renameChatBtn.addEventListener("click", () => {
@@ -1799,3 +1836,162 @@ window.addEventListener("load", () => {
     setStatus(`Failed to initialize: ${error.message}`);
   });
 });
+
+// Model switcher in topbar - sync with sidebar
+if (modelSwitcher) {
+  modelSwitcher.addEventListener("change", () => {
+    const value = modelSwitcher.value;
+    ensureModelOption(value);
+    modelInput.value = value;
+    localStorage.setItem(MODEL_KEY, value);
+  });
+}
+
+// Composer model and reasoning selects
+if (composerModel) {
+  const savedModel = localStorage.getItem(MODEL_KEY) || "gpt-5.2";
+  // Ensure option exists
+  const exists = Array.from(composerModel.options).some(opt => opt.value === savedModel);
+  if (!exists) {
+    const option = document.createElement("option");
+    option.value = savedModel;
+    option.textContent = savedModel;
+    composerModel.appendChild(option);
+  }
+  composerModel.value = savedModel;
+
+  composerModel.addEventListener("change", () => {
+    const value = composerModel.value;
+    localStorage.setItem(MODEL_KEY, value);
+    // Sync with sidebar
+    if (modelInput) {
+      ensureModelOption(value);
+      modelInput.value = value;
+    }
+  });
+}
+
+if (composerReasoning) {
+  const savedReasoning = localStorage.getItem(REASONING_KEY) || "default";
+  composerReasoning.value = savedReasoning;
+
+  composerReasoning.addEventListener("change", () => {
+    const value = composerReasoning.value;
+    localStorage.setItem(REASONING_KEY, value);
+    // Sync with sidebar
+    if (reasoningSelect) {
+      reasoningSelect.value = value;
+    }
+  });
+}
+
+// Wide screen toggle (default: true)
+if (wideScreenToggle) {
+  const savedValue = localStorage.getItem(WIDE_SCREEN_KEY);
+  const isWide = savedValue === null ? true : savedValue === "true";
+  wideScreenToggle.checked = isWide;
+  if (isWide) {
+    document.body.classList.add("wide-screen");
+  }
+
+  wideScreenToggle.addEventListener("change", () => {
+    const isWide = wideScreenToggle.checked;
+    document.body.classList.toggle("wide-screen", isWide);
+    localStorage.setItem(WIDE_SCREEN_KEY, isWide);
+  });
+}
+
+// Composer resize handle
+if (resizeHandle && composer) {
+  const savedHeight = localStorage.getItem(COMPOSER_HEIGHT_KEY);
+  // Ensure saved height is at least 200px
+  if (savedHeight && parseInt(savedHeight, 10) >= 200) {
+    composer.style.height = savedHeight + "px";
+  } else if (savedHeight) {
+    // Reset too-small saved height
+    localStorage.removeItem(COMPOSER_HEIGHT_KEY);
+  }
+
+  let startY = 0;
+  let startHeight = 0;
+
+  const onMouseMove = (e) => {
+    const delta = startY - e.clientY;
+    // Minimum 200px ensures textarea + composer-actions stay visible
+    const newHeight = Math.max(200, Math.min(500, startHeight + delta));
+    composer.style.height = newHeight + "px";
+  };
+
+  const onMouseUp = () => {
+    document.body.classList.remove("resizing-composer");
+    document.removeEventListener("mousemove", onMouseMove);
+    document.removeEventListener("mouseup", onMouseUp);
+    localStorage.setItem(COMPOSER_HEIGHT_KEY, composer.offsetHeight);
+  };
+
+  resizeHandle.addEventListener("mousedown", (e) => {
+    e.preventDefault();
+    startY = e.clientY;
+    startHeight = composer.offsetHeight;
+    document.body.classList.add("resizing-composer");
+    document.addEventListener("mousemove", onMouseMove);
+    document.addEventListener("mouseup", onMouseUp);
+  });
+}
+
+// Sidebar toggle
+if (sidebarToggle) {
+  const savedCollapsed = localStorage.getItem(SIDEBAR_COLLAPSED_KEY) === "true";
+  if (savedCollapsed) {
+    document.body.classList.add("sidebar-collapsed");
+  }
+
+  sidebarToggle.addEventListener("click", () => {
+    const isCollapsed = document.body.classList.toggle("sidebar-collapsed");
+    localStorage.setItem(SIDEBAR_COLLAPSED_KEY, isCollapsed);
+  });
+}
+
+// Font size settings (range slider)
+if (fontSizeRange) {
+  const savedSize = localStorage.getItem(FONT_SIZE_KEY) || "15";
+  fontSizeRange.value = savedSize;
+  if (fontSizeValue) fontSizeValue.textContent = savedSize;
+  document.documentElement.style.setProperty("--text-font-size", `${savedSize}px`);
+
+  fontSizeRange.addEventListener("input", () => {
+    const size = fontSizeRange.value;
+    if (fontSizeValue) fontSizeValue.textContent = size;
+    document.documentElement.style.setProperty("--text-font-size", `${size}px`);
+    localStorage.setItem(FONT_SIZE_KEY, size);
+  });
+}
+
+// Force visibility of composer controls (fallback for CSS issues)
+function ensureComposerControlsVisible() {
+  const composerActions = document.querySelector(".composer-actions");
+  const composerLeft = document.querySelector(".composer-left");
+  const modelSelect = document.getElementById("composerModel");
+  const reasoningSelect = document.getElementById("composerReasoning");
+  const sendButton = document.getElementById("sendBtn");
+
+  if (composerActions) {
+    composerActions.style.cssText = "display: flex !important; visibility: visible !important; opacity: 1 !important; min-height: 50px;";
+  }
+  if (composerLeft) {
+    composerLeft.style.cssText = "display: flex !important; visibility: visible !important; opacity: 1 !important; gap: 8px;";
+  }
+  if (modelSelect) {
+    modelSelect.style.cssText = "display: inline-block !important; visibility: visible !important; opacity: 1 !important; min-width: 130px; height: 40px;";
+  }
+  if (reasoningSelect) {
+    reasoningSelect.style.cssText = "display: inline-block !important; visibility: visible !important; opacity: 1 !important; min-width: 130px; height: 40px;";
+  }
+  if (sendButton) {
+    sendButton.style.cssText = "display: inline-block !important; visibility: visible !important; opacity: 1 !important; min-width: 80px;";
+  }
+}
+
+// Call on DOM ready and after a short delay
+document.addEventListener("DOMContentLoaded", ensureComposerControlsVisible);
+setTimeout(ensureComposerControlsVisible, 100);
