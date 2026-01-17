@@ -1,0 +1,150 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>WeiChat - API Key Chat UI</title>
+    <link rel="stylesheet" href="styles.css" />
+    <link
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.css"
+    />
+    <link
+      id="hljs-theme"
+      rel="stylesheet"
+      href="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css"
+    />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="sidebar">
+        <div class="sidebar-header">
+          <div class="logo">WeiChat</div>
+          <button id="newChatBtn" class="ghost">New chat</button>
+        </div>
+
+        <div id="settingsPanel" class="sidebar-section settings">
+          <div class="section-title">Settings</div>
+          <div class="field">
+            <label for="apiKey">API key</label>
+            <input id="apiKey" type="password" placeholder="sk-..." autocomplete="off" />
+            <div class="helper">Key is only stored locally if you choose Remember.</div>
+          </div>
+          <div class="field">
+            <label for="model">Model</label>
+            <select id="model">
+              <option value="gpt-5.2">gpt-5.2</option>
+              <option value="gpt-5.2-pro">gpt-5.2-pro</option>
+              <option value="gpt-5">gpt-5</option>
+              <option value="gpt-4.1">gpt-4.1</option>
+              <option value="gpt-4o">gpt-4o</option>
+              <option value="gpt-4o-mini">gpt-4o-mini</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="reasoningEffort">Reasoning effort</label>
+            <select id="reasoningEffort">
+              <option value="default" selected>Model default</option>
+              <option value="none">None</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+              <option value="xhigh">Extra high</option>
+            </select>
+            <div class="helper">Recommended for GPT-5 models.</div>
+          </div>
+          <div class="field">
+            <label for="systemPrompt">System instructions (optional)</label>
+            <textarea id="systemPrompt" rows="3" placeholder="You are a concise, helpful assistant."></textarea>
+          </div>
+          <div class="field inline">
+            <label class="checkbox">
+              <input id="rememberKey" type="checkbox" />
+              Remember key on this device
+            </label>
+            <span class="muted">LocalStorage only - avoid shared machines</span>
+          </div>
+        </div>
+
+        <div id="sidebarResizer" class="sidebar-resizer" role="separator" aria-orientation="horizontal" tabindex="0"></div>
+
+        <div class="sidebar-section chats">
+          <div class="section-title">Chats</div>
+          <div id="chatList" class="chat-list"></div>
+        </div>
+
+        <div class="sidebar-section">
+          <div class="section-title">Theme</div>
+          <select id="themeSelect">
+            <option value="system" selected>System</option>
+            <option value="light">Light</option>
+            <option value="dark">Dark</option>
+          </select>
+        </div>
+
+        <div class="note">
+          This is a local-only demo UI. For production apps, route requests through your own backend to keep keys safe.
+        </div>
+      </aside>
+
+      <div class="main">
+        <header class="topbar">
+          <div class="top-left">
+            <span id="modelPill" class="pill">gpt-5.2</span>
+            <span id="tokenPill" class="pill pill-secondary">Tokens used 0</span>
+            <span class="status-dot"></span>
+            <div id="status" class="status">Ready</div>
+            <div id="timer" class="status timer">00:00</div>
+          </div>
+          <div class="top-actions">
+            <button id="clearBtn" class="ghost">Clear</button>
+          </div>
+        </header>
+
+        <main class="chat">
+          <div id="chatLog" class="chat-log"></div>
+        </main>
+
+        <footer class="composer">
+          <div class="attachments">
+            <label class="file-input">
+              <input
+                id="fileInput"
+                type="file"
+                accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.pdf"
+                multiple
+              />
+              <span>Attach PDF or image</span>
+            </label>
+            <div id="attachmentList" class="attachment-list"></div>
+          </div>
+          <textarea
+            id="messageInput"
+            rows="3"
+            placeholder="Message Wei... (Enter to send, Shift+Enter for newline)"
+          ></textarea>
+          <div class="composer-actions">
+            <div class="composer-hint">Shift + Enter for a newline</div>
+            <button id="sendBtn" class="primary">Send</button>
+          </div>
+        </footer>
+      </div>
+    </div>
+
+    <div id="chatContextMenu" class="context-menu" hidden>
+      <button id="renameChatBtn" type="button">Rename chat</button>
+      <button id="deleteChatBtn" class="danger" type="button">Delete chat</button>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/lib/highlight.min.js" defer></script>
+    <script src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/katex.min.js" defer></script>
+    <script
+      src="https://cdn.jsdelivr.net/npm/katex@0.16.9/dist/contrib/auto-render.min.js"
+      defer
+    ></script>
+    <script src="app.js" defer></script>
+  </body>
+</html>
