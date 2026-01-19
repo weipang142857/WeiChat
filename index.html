@@ -99,11 +99,20 @@
               <input
                 id="fileInput"
                 type="file"
-                accept="image/png,image/jpeg,image/webp,image/gif,application/pdf,.pdf"
                 multiple
               />
-              <span>Attach PDF or image</span>
+              <span>Attach files</span>
             </label>
+            <label class="file-input folder-input">
+              <input
+                id="folderInput"
+                type="file"
+                webkitdirectory
+                multiple
+              />
+              <span>📁 Upload codebase</span>
+            </label>
+            <button type="button" id="manageFilesBtn" class="file-input">📋 Manage files</button>
             <div id="attachmentList" class="attachment-list"></div>
           </div>
           <textarea
@@ -129,6 +138,21 @@
                 <option value="high">Reasoning: High</option>
                 <option value="xhigh">Reasoning: XHigh</option>
               </select>
+              <label class="tool-toggle" title="Enable web search">
+                <input type="checkbox" id="webSearchToggle" />
+                <span class="tool-icon">🔍</span>
+                <span class="tool-label">Search</span>
+              </label>
+              <label class="tool-toggle" title="Enable code interpreter">
+                <input type="checkbox" id="codeInterpreterToggle" />
+                <span class="tool-icon">💻</span>
+                <span class="tool-label">Code</span>
+              </label>
+              <label class="tool-toggle" title="Enable file search">
+                <input type="checkbox" id="fileSearchToggle" />
+                <span class="tool-icon">📁</span>
+                <span class="tool-label">Files</span>
+              </label>
             </div>
             <button id="sendBtn" class="primary">Send</button>
           </div>
@@ -139,6 +163,29 @@
     <div id="chatContextMenu" class="context-menu" hidden>
       <button id="renameChatBtn" type="button">Rename chat</button>
       <button id="deleteChatBtn" class="danger" type="button">Delete chat</button>
+    </div>
+
+    <div id="fileManagerModal" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-content">
+        <div class="modal-header">
+          <h3>File Manager</h3>
+          <button type="button" id="closeFileManagerBtn" class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div class="file-manager-info">
+            <span id="vectorStoreInfo">Vector Store: Not created</span>
+            <button type="button" id="refreshFilesBtn" class="ghost small">Refresh</button>
+          </div>
+          <div id="fileManagerList" class="file-manager-list">
+            <div class="file-manager-empty">No files uploaded yet</div>
+          </div>
+        </div>
+        <div class="modal-footer">
+          <button type="button" id="clearVectorStoreBtn" class="ghost danger">Clear all files</button>
+          <button type="button" id="newVectorStoreBtn" class="ghost">New vector store</button>
+        </div>
+      </div>
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/marked/marked.min.js" defer></script>

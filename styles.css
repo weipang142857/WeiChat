@@ -210,6 +210,8 @@ textarea {
 }
 
 .chat-item {
+  display: flex;
+  align-items: center;
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 10px;
@@ -234,6 +236,23 @@ textarea {
   border-color: var(--accent);
   background: var(--panel-muted);
   font-weight: 600;
+}
+
+.chat-item.branched {
+  padding-left: 8px;
+}
+
+.chat-item .branch-icon {
+  color: #8b5cf6;
+  font-size: 14px;
+  margin-right: 6px;
+  flex-shrink: 0;
+}
+
+.chat-item .chat-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 .main {
@@ -450,10 +469,22 @@ textarea {
   position: relative;
 }
 
-.code-copy-btn {
+.code-block-buttons {
   position: absolute;
   top: 8px;
   right: 8px;
+  display: flex;
+  gap: 4px;
+  opacity: 0;
+  transition: opacity var(--transition);
+}
+
+.code-block-wrapper:hover .code-block-buttons {
+  opacity: 1;
+}
+
+.code-copy-btn,
+.code-download-btn {
   padding: 4px 10px;
   font-size: 12px;
   font-weight: 500;
@@ -462,16 +493,23 @@ textarea {
   background: rgba(255, 255, 255, 0.1);
   color: var(--code-text);
   cursor: pointer;
-  opacity: 0;
-  transition: opacity var(--transition), background var(--transition);
+  transition: background var(--transition);
 }
 
-.code-block-wrapper:hover .code-copy-btn {
-  opacity: 1;
-}
-
-.code-copy-btn:hover {
+.code-copy-btn:hover,
+.code-download-btn:hover {
   background: rgba(255, 255, 255, 0.2);
+  transform: none;
+  box-shadow: none;
+}
+
+.code-download-btn {
+  background: rgba(37, 99, 235, 0.3);
+  border-color: rgba(37, 99, 235, 0.4);
+}
+
+.code-download-btn:hover {
+  background: rgba(37, 99, 235, 0.5);
 }
 
 .msg.pending .text {
@@ -561,6 +599,16 @@ textarea {
 .action-btn.action-delete:hover {
   background: rgba(239, 68, 68, 0.1);
   border-color: #ef4444;
+}
+
+.action-btn.action-branch {
+  color: #8b5cf6;
+  border-color: rgba(139, 92, 246, 0.3);
+}
+
+.action-btn.action-branch:hover {
+  background: rgba(139, 92, 246, 0.1);
+  border-color: #8b5cf6;
 }
 
 .context-menu {
@@ -753,6 +801,253 @@ textarea {
   outline: none;
   border-color: var(--accent);
   box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15);
+}
+
+/* Tool toggles (web search, code interpreter) */
+.tool-toggle {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: var(--input-bg);
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: all var(--transition);
+  user-select: none;
+}
+
+.tool-toggle:hover {
+  border-color: var(--accent);
+  color: var(--ink);
+}
+
+.tool-toggle input[type="checkbox"] {
+  display: none;
+}
+
+.tool-toggle input[type="checkbox"]:checked + .tool-icon {
+  opacity: 1;
+}
+
+.tool-toggle input[type="checkbox"]:checked ~ .tool-label {
+  color: var(--ink);
+}
+
+.tool-toggle:has(input:checked) {
+  border-color: var(--accent);
+  background: rgba(37, 99, 235, 0.1);
+  color: var(--ink);
+}
+
+.tool-icon {
+  font-size: 14px;
+  opacity: 0.6;
+  transition: opacity var(--transition);
+}
+
+.tool-label {
+  font-weight: 500;
+  transition: color var(--transition);
+}
+
+/* Hide tool labels on smaller screens */
+@media (max-width: 860px) {
+  .tool-label {
+    display: none;
+  }
+
+  .tool-toggle {
+    padding: 8px 10px;
+  }
+}
+
+/* Modal styles */
+.modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal[hidden] {
+  display: none;
+}
+
+.modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(4px);
+}
+
+.modal-content {
+  position: relative;
+  background: var(--panel);
+  border-radius: 16px;
+  border: 1px solid var(--border);
+  box-shadow: var(--shadow-lg);
+  width: 90%;
+  max-width: 600px;
+  max-height: 80vh;
+  display: flex;
+  flex-direction: column;
+  animation: modalIn 0.2s ease-out;
+}
+
+@keyframes modalIn {
+  from {
+    opacity: 0;
+    transform: scale(0.95);
+  }
+  to {
+    opacity: 1;
+    transform: scale(1);
+  }
+}
+
+.modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 16px 20px;
+  border-bottom: 1px solid var(--border);
+}
+
+.modal-header h3 {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.modal-close {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 24px;
+  cursor: pointer;
+  border-radius: 8px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.modal-close:hover {
+  background: var(--panel-muted);
+  color: var(--ink);
+  transform: none;
+  box-shadow: none;
+}
+
+.modal-body {
+  padding: 16px 20px;
+  overflow-y: auto;
+  flex: 1;
+}
+
+.modal-footer {
+  display: flex;
+  gap: 8px;
+  justify-content: flex-end;
+  padding: 16px 20px;
+  border-top: 1px solid var(--border);
+}
+
+/* File manager styles */
+.file-manager-info {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 12px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+.file-manager-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  min-height: 100px;
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.file-manager-empty {
+  text-align: center;
+  color: var(--muted);
+  padding: 40px 20px;
+  font-size: 14px;
+}
+
+.file-manager-item {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 12px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel-muted);
+}
+
+.file-manager-item .file-icon {
+  font-size: 20px;
+}
+
+.file-manager-item .file-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.file-manager-item .file-name {
+  font-size: 14px;
+  font-weight: 500;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.file-manager-item .file-meta {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.file-manager-item .file-status {
+  font-size: 11px;
+  padding: 2px 8px;
+  border-radius: 999px;
+  background: var(--accent);
+  color: #fff;
+}
+
+.file-manager-item .file-status.processing {
+  background: #f59e0b;
+}
+
+.file-manager-item .file-remove {
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+button.small {
+  padding: 6px 12px;
+  font-size: 12px;
+}
+
+button.danger {
+  color: #ef4444;
+  border-color: rgba(239, 68, 68, 0.3);
+}
+
+button.danger:hover {
+  background: rgba(239, 68, 68, 0.1);
+  border-color: #ef4444;
 }
 
 .composer-hint {

@@ -30,6 +30,18 @@ const composer = document.querySelector(".composer");
 const sidebarToggle = document.getElementById("sidebarToggle");
 const fontSizeRange = document.getElementById("fontSizeRange");
 const fontSizeValue = document.getElementById("fontSizeValue");
+const webSearchToggle = document.getElementById("webSearchToggle");
+const codeInterpreterToggle = document.getElementById("codeInterpreterToggle");
+const fileSearchToggle = document.getElementById("fileSearchToggle");
+const folderInput = document.getElementById("folderInput");
+const manageFilesBtn = document.getElementById("manageFilesBtn");
+const fileManagerModal = document.getElementById("fileManagerModal");
+const closeFileManagerBtn = document.getElementById("closeFileManagerBtn");
+const fileManagerList = document.getElementById("fileManagerList");
+const vectorStoreInfo = document.getElementById("vectorStoreInfo");
+const refreshFilesBtn = document.getElementById("refreshFilesBtn");
+const clearVectorStoreBtn = document.getElementById("clearVectorStoreBtn");
+const newVectorStoreBtn = document.getElementById("newVectorStoreBtn");
 
 const STORAGE_KEY = "keychat.apiKey";
 const MODEL_KEY = "keychat.model";
@@ -42,6 +54,10 @@ const WIDE_SCREEN_KEY = "keychat.wideScreen";
 const COMPOSER_HEIGHT_KEY = "keychat.composerHeight";
 const SIDEBAR_COLLAPSED_KEY = "keychat.sidebarCollapsed";
 const FONT_SIZE_KEY = "keychat.fontSize";
+const WEB_SEARCH_KEY = "keychat.webSearch";
+const CODE_INTERPRETER_KEY = "keychat.codeInterpreter";
+const FILE_SEARCH_KEY = "keychat.fileSearch";
+const VECTOR_STORE_KEY = "keychat.vectorStore";
 const OPFS_FILE_NAME = "weichat-history.json";
 
 const HLJS_THEMES = {
@@ -499,6 +515,39 @@ function renderMarkdownInto(el, text) {
     const wrapper = document.createElement("div");
     wrapper.className = "code-block-wrapper";
 
+    // Try to detect language/filename from the code block
+    const codeEl = pre.querySelector("code");
+    let language = "";
+    let filename = "";
+
+    if (codeEl) {
+      // Get language from class (e.g., "language-javascript" or "hljs language-python")
+      const classes = Array.from(codeEl.classList);
+      const langClass = classes.find(c => c.startsWith("language-"));
+      if (langClass) {
+        language = langClass.replace("language-", "");
+      }
+    }
+
+    // Map language to file extension
+    const extMap = {
+      javascript: "js", js: "js", typescript: "ts", ts: "ts",
+      python: "py", py: "py", java: "java", cpp: "cpp", "c++": "cpp",
+      c: "c", csharp: "cs", "c#": "cs", go: "go", rust: "rs",
+      ruby: "rb", php: "php", swift: "swift", kotlin: "kt",
+      html: "html", css: "css", scss: "scss", json: "json",
+      yaml: "yaml", yml: "yml", xml: "xml", sql: "sql",
+      bash: "sh", shell: "sh", sh: "sh", zsh: "zsh",
+      markdown: "md", md: "md", txt: "txt", text: "txt",
+      latex: "tex", tex: "tex", bibtex: "bib", bib: "bib"
+    };
+
+    const ext = extMap[language] || "txt";
+    filename = `code.${ext}`;
+
+    const buttonContainer = document.createElement("div");
+    buttonContainer.className = "code-block-buttons";
+
     const copyBtn = document.createElement("button");
     copyBtn.className = "code-copy-btn";
     copyBtn.textContent = "Copy";
@@ -515,9 +564,37 @@ function renderMarkdownInto(el, text) {
       }
     });
 
+    const downloadBtn = document.createElement("button");
+    downloadBtn.className = "code-download-btn";
+    downloadBtn.textContent = "Download";
+    downloadBtn.type = "button";
+    downloadBtn.addEventListener("click", () => {
+      const code = pre.querySelector("code")?.textContent || pre.textContent;
+
+      // Prompt for filename
+      const userFilename = prompt("Save as:", filename);
+      if (!userFilename) return;
+
+      const blob = new Blob([code], { type: "text/plain" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = userFilename;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+
+      downloadBtn.textContent = "Downloaded!";
+      setTimeout(() => { downloadBtn.textContent = "Download"; }, 2000);
+    });
+
+    buttonContainer.appendChild(copyBtn);
+    buttonContainer.appendChild(downloadBtn);
+
     pre.parentNode.insertBefore(wrapper, pre);
     wrapper.appendChild(pre);
-    wrapper.appendChild(copyBtn);
+    wrapper.appendChild(buttonContainer);
   });
 
   if (window.renderMathInElement) {
@@ -639,6 +716,16 @@ function createActions({ text, messageIndex, role }) {
     actions.appendChild(regenBtn);
   }
 
+  // Branch button - available for all messages
+  const branchBtn = document.createElement("button");
+  branchBtn.type = "button";
+  branchBtn.className = "action-btn action-branch";
+  branchBtn.textContent = "Branch";
+  branchBtn.title = "Create a new chat branch from this point";
+  branchBtn.disabled = state.sending;
+  branchBtn.addEventListener("click", () => branchFromMessage(messageIndex));
+  actions.appendChild(branchBtn);
+
   const deleteBtn = document.createElement("button");
   deleteBtn.type = "button";
   deleteBtn.className = "action-btn action-delete";
@@ -656,11 +743,15 @@ function updateActionButtons() {
     const index = Number(actions.dataset.messageIndex);
     const regenBtn = actions.querySelector(".action-regen");
     const deleteBtn = actions.querySelector(".action-delete");
+    const branchBtn = actions.querySelector(".action-branch");
     if (regenBtn) {
       regenBtn.disabled = state.sending || index !== lastAssistantIndex;
     }
     if (deleteBtn) {
       deleteBtn.disabled = state.sending;
+    }
+    if (branchBtn) {
+      branchBtn.disabled = state.sending;
     }
   });
 }
@@ -901,6 +992,337 @@ async function uploadPdfAttachment(file, apiKey) {
   return data.id;
 }
 
+async function uploadFileForSearch(file, apiKey) {
+  const formData = new FormData();
+  formData.append("purpose", "assistants");
+  formData.append("file", file, file.name);
+
+  const response = await fetch("https://api.openai.com/v1/files", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: formData,
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    let message = `Upload failed (${response.status}).`;
+    try {
+      const errorJson = JSON.parse(errorText);
+      message = errorJson?.error?.message || message;
+    } catch (error) {
+      if (errorText) {
+        message = errorText;
+      }
+    }
+    throw new Error(message);
+  }
+
+  const data = await response.json();
+  if (!data?.id) {
+    throw new Error("Upload did not return a file ID.");
+  }
+  return data.id;
+}
+
+async function createVectorStore(apiKey, name = "WeiChat Files") {
+  const response = await fetch("https://api.openai.com/v1/vector_stores", {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify({ name }),
+  });
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to create vector store: ${errorText}`);
+  }
+
+  const data = await response.json();
+  return data.id;
+}
+
+async function addFileToVectorStore(apiKey, vectorStoreId, fileId) {
+  const response = await fetch(
+    `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify({ file_id: fileId }),
+    }
+  );
+
+  if (!response.ok) {
+    const errorText = await response.text();
+    throw new Error(`Failed to add file to vector store: ${errorText}`);
+  }
+
+  return response.json();
+}
+
+async function getOrCreateVectorStore(apiKey) {
+  // Get current session's vector store
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  let vectorStoreId = session?.vectorStoreId || localStorage.getItem(VECTOR_STORE_KEY);
+
+  if (vectorStoreId) {
+    // Verify it still exists
+    try {
+      const response = await fetch(
+        `https://api.openai.com/v1/vector_stores/${vectorStoreId}`,
+        {
+          headers: { Authorization: `Bearer ${apiKey}` },
+        }
+      );
+      if (response.ok) {
+        // Update session if needed
+        if (session && !session.vectorStoreId) {
+          session.vectorStoreId = vectorStoreId;
+          saveSessions();
+        }
+        return vectorStoreId;
+      }
+    } catch (e) {
+      // Vector store doesn't exist, create new one
+    }
+  }
+
+  // Create new vector store for this session
+  vectorStoreId = await createVectorStore(apiKey, `WeiChat - ${session?.title || 'Files'}`);
+
+  // Save to session
+  if (session) {
+    session.vectorStoreId = vectorStoreId;
+    saveSessions();
+  } else {
+    localStorage.setItem(VECTOR_STORE_KEY, vectorStoreId);
+  }
+
+  return vectorStoreId;
+}
+
+function getCurrentVectorStoreId() {
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  return session?.vectorStoreId || localStorage.getItem(VECTOR_STORE_KEY);
+}
+
+async function listVectorStoreFiles(apiKey, vectorStoreId) {
+  const response = await fetch(
+    `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
+    {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error("Failed to list files");
+  }
+
+  const data = await response.json();
+  return data.data || [];
+}
+
+async function getFileInfo(apiKey, fileId) {
+  const response = await fetch(
+    `https://api.openai.com/v1/files/${fileId}`,
+    {
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }
+  );
+
+  if (!response.ok) {
+    return null;
+  }
+
+  return response.json();
+}
+
+async function removeFileFromVectorStore(apiKey, vectorStoreId, fileId) {
+  const response = await fetch(
+    `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files/${fileId}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error("Failed to remove file");
+  }
+
+  return response.json();
+}
+
+async function deleteVectorStore(apiKey, vectorStoreId) {
+  const response = await fetch(
+    `https://api.openai.com/v1/vector_stores/${vectorStoreId}`,
+    {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${apiKey}` },
+    }
+  );
+
+  if (!response.ok) {
+    throw new Error("Failed to delete vector store");
+  }
+
+  return response.json();
+}
+
+function formatFileSize(bytes) {
+  if (bytes < 1024) return bytes + " B";
+  if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + " KB";
+  return (bytes / (1024 * 1024)).toFixed(1) + " MB";
+}
+
+async function renderFileManagerList() {
+  const apiKey = apiKeyInput.value.trim();
+  const vectorStoreId = getCurrentVectorStoreId();
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+
+  if (!apiKey) {
+    fileManagerList.innerHTML = '<div class="file-manager-empty">Add API key to manage files</div>';
+    vectorStoreInfo.textContent = "Vector Store: Not configured";
+    return;
+  }
+
+  if (!vectorStoreId) {
+    fileManagerList.innerHTML = '<div class="file-manager-empty">No vector store for this chat. Upload files with File Search enabled.</div>';
+    vectorStoreInfo.textContent = `Chat: ${session?.title || 'Unknown'} - No vector store`;
+    return;
+  }
+
+  vectorStoreInfo.textContent = `Chat: ${session?.title || 'Global'} - ${vectorStoreId.slice(0, 16)}...`;
+  fileManagerList.innerHTML = '<div class="file-manager-empty">Loading files...</div>';
+
+  try {
+    const files = await listVectorStoreFiles(apiKey, vectorStoreId);
+
+    if (files.length === 0) {
+      fileManagerList.innerHTML = '<div class="file-manager-empty">No files in vector store</div>';
+      return;
+    }
+
+    fileManagerList.innerHTML = "";
+
+    for (const file of files) {
+      const fileInfo = await getFileInfo(apiKey, file.id);
+      const item = document.createElement("div");
+      item.className = "file-manager-item";
+
+      const statusClass = file.status === "completed" ? "" : " processing";
+      const statusText = file.status === "completed" ? "Ready" : file.status;
+
+      item.innerHTML = `
+        <span class="file-icon">📄</span>
+        <div class="file-info">
+          <div class="file-name">${fileInfo?.filename || file.id}</div>
+          <div class="file-meta">${fileInfo ? formatFileSize(fileInfo.bytes) : "Unknown size"}</div>
+        </div>
+        <span class="file-status${statusClass}">${statusText}</span>
+        <button type="button" class="ghost small file-remove" data-file-id="${file.id}">Remove</button>
+      `;
+
+      item.querySelector(".file-remove").addEventListener("click", async () => {
+        if (confirm("Remove this file from the vector store?")) {
+          try {
+            await removeFileFromVectorStore(apiKey, vectorStoreId, file.id);
+            setStatus("File removed from vector store.");
+            renderFileManagerList();
+          } catch (error) {
+            setStatus(`Failed to remove file: ${error.message}`);
+          }
+        }
+      });
+
+      fileManagerList.appendChild(item);
+    }
+  } catch (error) {
+    fileManagerList.innerHTML = `<div class="file-manager-empty">Error: ${error.message}</div>`;
+  }
+}
+
+function openFileManager() {
+  fileManagerModal.hidden = false;
+  renderFileManagerList();
+}
+
+function closeFileManager() {
+  fileManagerModal.hidden = true;
+}
+
+async function uploadFolderFiles(files) {
+  const apiKey = apiKeyInput.value.trim();
+  if (!apiKey) {
+    setStatus("Add your API key before uploading files.");
+    return;
+  }
+
+  // Supported file extensions for file search
+  const supportedExtensions = [
+    // Documents
+    '.pdf', '.txt', '.md', '.markdown', '.json', '.csv',
+    // LaTeX
+    '.tex', '.bib', '.sty', '.cls', '.bst',
+    // Code files
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', '.less',
+    '.java', '.c', '.cpp', '.h', '.hpp', '.cs', '.go', '.rs', '.rb', '.php',
+    '.swift', '.kt', '.scala', '.r', '.sql', '.sh', '.bash', '.zsh', '.ps1',
+    '.yaml', '.yml', '.xml', '.toml', '.ini', '.cfg', '.conf',
+    // Other text formats
+    '.log', '.env', '.gitignore', '.dockerfile', '.makefile'
+  ];
+
+  const validFiles = Array.from(files).filter(file => {
+    const name = file.name.toLowerCase();
+    // Skip hidden files and common non-text files
+    if (name.startsWith('.') || name.includes('node_modules/') || name.includes('.git/')) {
+      return false;
+    }
+    return supportedExtensions.some(ext => name.endsWith(ext));
+  });
+
+  if (validFiles.length === 0) {
+    setStatus("No supported files found in the folder.");
+    return;
+  }
+
+  setStatus(`Uploading ${validFiles.length} files...`);
+
+  let uploaded = 0;
+  let failed = 0;
+
+  for (const file of validFiles) {
+    try {
+      setStatus(`Uploading ${uploaded + 1}/${validFiles.length}: ${file.name}`);
+      const fileId = await uploadFileForSearch(file, apiKey);
+
+      // Add to vector store if file search is enabled
+      if (fileSearchToggle && fileSearchToggle.checked) {
+        const vectorStoreId = await getOrCreateVectorStore(apiKey);
+        await addFileToVectorStore(apiKey, vectorStoreId, fileId);
+      }
+
+      uploaded++;
+    } catch (error) {
+      console.error(`Failed to upload ${file.name}:`, error);
+      failed++;
+    }
+  }
+
+  if (failed > 0) {
+    setStatus(`Uploaded ${uploaded} files, ${failed} failed.`);
+  } else {
+    setStatus(`Successfully uploaded ${uploaded} files to search index.`);
+  }
+}
+
 function addAttachment(file) {
   if (!file) {
     return;
@@ -913,8 +1335,79 @@ function addAttachment(file) {
   const isImage =
     imageTypes.has(file.type) || imageExts.some((ext) => lowerName.endsWith(ext));
 
-  if (!isPdf && !isImage) {
-    setStatus("Unsupported file type. Use PDF or PNG/JPG/WEBP/GIF images.");
+  // Supported code/text file extensions for file search
+  const codeExtensions = [
+    '.txt', '.md', '.markdown', '.json', '.csv',
+    '.tex', '.bib', '.sty', '.cls', '.bst',
+    '.py', '.js', '.ts', '.jsx', '.tsx', '.html', '.css', '.scss', '.less',
+    '.java', '.c', '.cpp', '.h', '.hpp', '.cs', '.go', '.rs', '.rb', '.php',
+    '.swift', '.kt', '.scala', '.r', '.sql', '.sh', '.bash', '.zsh', '.ps1',
+    '.yaml', '.yml', '.xml', '.toml', '.ini', '.cfg', '.conf',
+    '.log', '.env', '.gitignore', '.dockerfile', '.makefile'
+  ];
+  const isCodeFile = codeExtensions.some(ext => lowerName.endsWith(ext));
+
+  if (!isPdf && !isImage && !isCodeFile) {
+    setStatus("Unsupported file type. Use images, PDFs, or code/text files.");
+    return;
+  }
+
+  // Handle code/text files - upload for file search
+  if (isCodeFile) {
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey) {
+      setStatus("Add your API key before uploading files.");
+      return;
+    }
+
+    if (!fileSearchToggle || !fileSearchToggle.checked) {
+      setStatus("Enable 'Files' toggle to upload code files for search.");
+      return;
+    }
+
+    const attachment = {
+      kind: "code",
+      name: file.name || "file.txt",
+      uploading: true,
+      fileId: null,
+    };
+
+    state.attachments.push(attachment);
+    state.loadingAttachments += 1;
+    updateControls();
+    renderAttachmentList();
+    setStatus(`Uploading ${file.name}...`);
+
+    uploadFileForSearch(file, apiKey)
+      .then(async (fileId) => {
+        attachment.fileId = fileId;
+        attachment.uploading = false;
+        setStatus("File uploaded.");
+
+        // Add to vector store
+        try {
+          setStatus("Adding file to search index...");
+          const vectorStoreId = await getOrCreateVectorStore(apiKey);
+          await addFileToVectorStore(apiKey, vectorStoreId, fileId);
+          attachment.inVectorStore = true;
+          setStatus("File ready for search.");
+        } catch (error) {
+          setStatus(`File uploaded but search setup failed: ${error.message}`);
+        }
+      })
+      .catch((error) => {
+        const index = state.attachments.indexOf(attachment);
+        if (index >= 0) {
+          state.attachments.splice(index, 1);
+        }
+        setStatus(`File upload failed: ${error.message}`);
+      })
+      .finally(() => {
+        state.loadingAttachments = Math.max(0, state.loadingAttachments - 1);
+        updateControls();
+        renderAttachmentList();
+      });
+
     return;
   }
 
@@ -939,10 +1432,23 @@ function addAttachment(file) {
     setStatus("Uploading PDF...");
 
     uploadPdfAttachment(file, apiKey)
-      .then((fileId) => {
+      .then(async (fileId) => {
         attachment.fileId = fileId;
         attachment.uploading = false;
         setStatus("PDF uploaded.");
+
+        // Add to vector store if file search is enabled
+        if (fileSearchToggle && fileSearchToggle.checked) {
+          try {
+            setStatus("Adding file to search index...");
+            const vectorStoreId = await getOrCreateVectorStore(apiKey);
+            await addFileToVectorStore(apiKey, vectorStoreId, fileId);
+            attachment.inVectorStore = true;
+            setStatus("File ready for search.");
+          } catch (error) {
+            setStatus(`File indexed but search setup failed: ${error.message}`);
+          }
+        }
       })
       .catch((error) => {
         const index = state.attachments.indexOf(attachment);
@@ -1107,6 +1613,7 @@ function createSession(title = "New chat") {
     title,
     messages: [],
     usageTokens: 0,
+    vectorStoreId: null,
     createdAt: Date.now(),
     updatedAt: Date.now(),
   };
@@ -1136,8 +1643,22 @@ function renderChatList() {
   sorted.forEach((session) => {
     const item = document.createElement("button");
     item.type = "button";
-    item.className = `chat-item${session.id === state.activeSessionId ? " active" : ""}`;
-    item.textContent = session.title || "New chat";
+    item.className = `chat-item${session.id === state.activeSessionId ? " active" : ""}${session.parentSessionId ? " branched" : ""}`;
+
+    // Add branch icon if this is a branched session
+    if (session.parentSessionId) {
+      const branchIcon = document.createElement("span");
+      branchIcon.className = "branch-icon";
+      branchIcon.textContent = "⑂";
+      branchIcon.title = "Branched conversation";
+      item.appendChild(branchIcon);
+    }
+
+    const titleSpan = document.createElement("span");
+    titleSpan.className = "chat-item-title";
+    titleSpan.textContent = session.title || "New chat";
+    item.appendChild(titleSpan);
+
     item.addEventListener("click", () => {
       if (state.sending) {
         return;
@@ -1267,6 +1788,47 @@ function deleteMessageAt(index) {
   setStatus("Message deleted.");
 }
 
+function branchFromMessage(index) {
+  if (state.sending) {
+    setStatus("Wait for the response to finish before branching.");
+    return;
+  }
+  if (index < 0 || index >= state.messages.length) {
+    return;
+  }
+
+  // Get the current session for reference
+  const currentSession = state.sessions.find((item) => item.id === state.activeSessionId);
+  const currentTitle = currentSession?.title || "Chat";
+
+  // Copy messages up to and including the selected index
+  const branchedMessages = JSON.parse(JSON.stringify(state.messages.slice(0, index + 1)));
+
+  // Create a new session with the branched messages
+  const newSession = createSession(`Branch: ${currentTitle}`);
+  newSession.messages = branchedMessages;
+  newSession.parentSessionId = state.activeSessionId;
+  newSession.branchPoint = index;
+
+  // Calculate token usage for branched messages (approximate)
+  let tokenEstimate = 0;
+  branchedMessages.forEach(msg => {
+    const text = typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content);
+    tokenEstimate += Math.ceil(text.length / 4); // Rough estimate
+  });
+  newSession.usageTokens = tokenEstimate;
+
+  // Add to sessions and switch to it
+  state.sessions.unshift(newSession);
+  saveSessions();
+
+  setActiveSession(newSession.id);
+  renderChatList();
+  renderChatMessages();
+
+  setStatus(`Created branch from message ${index + 1}. You can continue the conversation from here.`);
+}
+
 async function sendAssistantResponse() {
   const apiKey = apiKeyInput.value.trim();
   const model = composerModel ? composerModel.value : "gpt-5.2";
@@ -1326,6 +1888,32 @@ async function sendAssistantResponse() {
 
   if (reasoningEffort && reasoningEffort !== "default" && reasoningEffort !== "none") {
     payload.reasoning = { effort: reasoningEffort };
+  }
+
+  // Add tools if enabled
+  const tools = [];
+  if (webSearchToggle && webSearchToggle.checked) {
+    tools.push({ type: "web_search_preview" });
+  }
+  if (codeInterpreterToggle && codeInterpreterToggle.checked) {
+    tools.push({
+      type: "code_interpreter",
+      container: { type: "auto" }
+    });
+  }
+  if (fileSearchToggle && fileSearchToggle.checked) {
+    try {
+      const vectorStoreId = await getOrCreateVectorStore(apiKey);
+      tools.push({
+        type: "file_search",
+        vector_store_ids: [vectorStoreId]
+      });
+    } catch (error) {
+      setStatus(`File search setup failed: ${error.message}`);
+    }
+  }
+  if (tools.length > 0) {
+    payload.tools = tools;
   }
 
   let assistantText = "";
@@ -1439,10 +2027,46 @@ async function sendAssistantResponse() {
             throw new Error("Response failed.");
           case "error":
             throw new Error(event.error?.message || "Stream error.");
+          // Tool events
+          case "response.web_search_call.in_progress":
+            addNote("web_search", "Searching the web...");
+            setStatus("Searching the web...");
+            break;
+          case "response.web_search_call.completed":
+            addNote("web_search_done", "Web search complete");
+            break;
+          case "response.web_search_call.searching":
+            setStatus("Searching...");
+            break;
+          case "response.code_interpreter_call.in_progress":
+            addNote("code_interpreter", "Running code...");
+            setStatus("Running code...");
+            break;
+          case "response.code_interpreter_call.completed":
+            addNote("code_done", "Code execution complete");
+            break;
+          case "response.code_interpreter_call.code_delta":
+            // Code being written
+            setStatus("Writing code...");
+            break;
+          case "response.code_interpreter_call.output":
+            // Code output received
+            setStatus("Code output received");
+            break;
+          case "response.file_search_call.in_progress":
+            addNote("file_search", "Searching files...");
+            setStatus("Searching files...");
+            break;
+          case "response.file_search_call.completed":
+            addNote("file_search_done", "File search complete");
+            break;
+          case "response.file_search_call.searching":
+            setStatus("Searching through documents...");
+            break;
           default:
             // Log unknown events for debugging
-            if (event.type && event.type.includes("reasoning")) {
-              console.log("Reasoning event:", event.type, event);
+            if (event.type && (event.type.includes("reasoning") || event.type.includes("tool") || event.type.includes("web_search") || event.type.includes("code_interpreter") || event.type.includes("file_search"))) {
+              console.log("Event:", event.type, event);
             }
             break;
         }
@@ -1995,3 +2619,131 @@ function ensureComposerControlsVisible() {
 // Call on DOM ready and after a short delay
 document.addEventListener("DOMContentLoaded", ensureComposerControlsVisible);
 setTimeout(ensureComposerControlsVisible, 100);
+
+// Web search toggle
+if (webSearchToggle) {
+  const savedWebSearch = localStorage.getItem(WEB_SEARCH_KEY) === "true";
+  webSearchToggle.checked = savedWebSearch;
+
+  webSearchToggle.addEventListener("change", () => {
+    localStorage.setItem(WEB_SEARCH_KEY, webSearchToggle.checked);
+  });
+}
+
+// Code interpreter toggle
+if (codeInterpreterToggle) {
+  const savedCodeInterpreter = localStorage.getItem(CODE_INTERPRETER_KEY) === "true";
+  codeInterpreterToggle.checked = savedCodeInterpreter;
+
+  codeInterpreterToggle.addEventListener("change", () => {
+    localStorage.setItem(CODE_INTERPRETER_KEY, codeInterpreterToggle.checked);
+  });
+}
+
+// File search toggle
+if (fileSearchToggle) {
+  const savedFileSearch = localStorage.getItem(FILE_SEARCH_KEY) === "true";
+  fileSearchToggle.checked = savedFileSearch;
+
+  fileSearchToggle.addEventListener("change", () => {
+    localStorage.setItem(FILE_SEARCH_KEY, fileSearchToggle.checked);
+  });
+}
+
+// Folder upload
+if (folderInput) {
+  folderInput.addEventListener("change", () => {
+    const files = folderInput.files;
+    if (files && files.length > 0) {
+      uploadFolderFiles(files);
+    }
+    folderInput.value = "";
+  });
+}
+
+// File manager modal
+if (manageFilesBtn) {
+  manageFilesBtn.addEventListener("click", openFileManager);
+}
+
+if (closeFileManagerBtn) {
+  closeFileManagerBtn.addEventListener("click", closeFileManager);
+}
+
+if (fileManagerModal) {
+  fileManagerModal.querySelector(".modal-backdrop").addEventListener("click", closeFileManager);
+}
+
+if (refreshFilesBtn) {
+  refreshFilesBtn.addEventListener("click", renderFileManagerList);
+}
+
+if (clearVectorStoreBtn) {
+  clearVectorStoreBtn.addEventListener("click", async () => {
+    const apiKey = apiKeyInput.value.trim();
+    const vectorStoreId = getCurrentVectorStoreId();
+    const session = state.sessions.find((s) => s.id === state.activeSessionId);
+
+    if (!apiKey || !vectorStoreId) {
+      setStatus("No vector store to clear.");
+      return;
+    }
+
+    if (!confirm("Delete all files from this chat's vector store? This cannot be undone.")) {
+      return;
+    }
+
+    try {
+      await deleteVectorStore(apiKey, vectorStoreId);
+      if (session) {
+        session.vectorStoreId = null;
+        saveSessions();
+      } else {
+        localStorage.removeItem(VECTOR_STORE_KEY);
+      }
+      setStatus("Vector store deleted.");
+      renderFileManagerList();
+    } catch (error) {
+      setStatus(`Failed to delete vector store: ${error.message}`);
+    }
+  });
+}
+
+if (newVectorStoreBtn) {
+  newVectorStoreBtn.addEventListener("click", async () => {
+    const apiKey = apiKeyInput.value.trim();
+    const session = state.sessions.find((s) => s.id === state.activeSessionId);
+
+    if (!apiKey) {
+      setStatus("Add API key first.");
+      return;
+    }
+
+    if (!confirm("Create a new vector store for this chat? The old one will be deleted.")) {
+      return;
+    }
+
+    try {
+      const oldVectorStoreId = getCurrentVectorStoreId();
+      if (oldVectorStoreId) {
+        try {
+          await deleteVectorStore(apiKey, oldVectorStoreId);
+        } catch (e) {
+          // Ignore if old store doesn't exist
+        }
+      }
+
+      const newId = await createVectorStore(apiKey, `WeiChat - ${session?.title || 'Files'}`);
+      if (session) {
+        session.vectorStoreId = newId;
+        saveSessions();
+      } else {
+        localStorage.setItem(VECTOR_STORE_KEY, newId);
+      }
+      setStatus("New vector store created.");
+      renderFileManagerList();
+    } catch (error) {
+      setStatus(`Failed to create vector store: ${error.message}`);
+    }
+  });
+}
