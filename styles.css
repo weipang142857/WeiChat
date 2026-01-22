@@ -253,6 +253,45 @@ textarea {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+  flex: 1;
+}
+
+/* Chat star button */
+.chat-star {
+  border: none;
+  background: transparent;
+  color: var(--muted);
+  font-size: 14px;
+  padding: 0;
+  margin-right: 6px;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity var(--transition), color var(--transition);
+  flex-shrink: 0;
+  line-height: 1;
+}
+
+.chat-item:hover .chat-star,
+.chat-star.active {
+  opacity: 1;
+}
+
+.chat-star:hover {
+  color: #f59e0b;
+  transform: none;
+  box-shadow: none;
+}
+
+.chat-star.active {
+  color: #f59e0b;
+}
+
+.chat-item.starred {
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.chat-item.starred:hover {
+  background: rgba(245, 158, 11, 0.1);
 }
 
 .main {
@@ -392,26 +431,28 @@ textarea {
 }
 
 
-.text .katex,
-.text .katex-display {
+.text .katex {
+  display: inline-block;
   white-space: nowrap;
   word-break: normal;
   overflow-wrap: normal;
-  text-align: left;
-  line-height: 1.2;
+  line-height: 1.4;
+  vertical-align: middle;
 }
 
 .text .katex-display {
+  display: block !important;
   overflow-x: auto;
   overflow-y: hidden;
   max-width: 100%;
-  display: block;
   margin: 1em 0;
-  white-space: normal;
+  text-align: center;
 }
 
 .text .katex-display > .katex {
+  display: inline-block;
   white-space: nowrap;
+  text-align: left;
 }
 
 .text .katex * {
@@ -1050,6 +1091,127 @@ button.danger:hover {
   border-color: #ef4444;
 }
 
+/* Share modal styles */
+.share-info {
+  color: var(--muted);
+  font-size: 14px;
+  margin-bottom: 16px;
+}
+
+.share-options {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.share-option {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  width: 100%;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--panel);
+  color: var(--ink);
+  font-family: inherit;
+  cursor: pointer;
+  transition: all var(--transition);
+  text-align: left;
+}
+
+.share-option:hover {
+  border-color: var(--accent);
+  background: var(--panel-muted);
+  transform: none;
+  box-shadow: none;
+}
+
+.share-icon {
+  font-size: 24px;
+  flex-shrink: 0;
+}
+
+.share-label {
+  font-size: 14px;
+  font-weight: 600;
+  flex: 1;
+}
+
+.share-desc {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.share-divider {
+  border: none;
+  border-top: 1px solid var(--border);
+  margin: 8px 0;
+}
+
+/* Storage controls */
+.storage-field {
+  margin-top: 12px;
+  padding-top: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.storage-controls {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 6px;
+  flex-wrap: wrap;
+}
+
+.storage-status {
+  font-size: 12px;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 150px;
+}
+
+.storage-status.linked {
+  color: var(--success, #22c55e);
+}
+
+.btn-secondary {
+  background: var(--bg-secondary);
+  color: var(--fg);
+  border: 1px solid var(--border);
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+  transition: background var(--transition);
+}
+
+.btn-secondary:hover {
+  background: var(--bg-tertiary);
+}
+
+.btn-danger {
+  background: #dc2626;
+  color: white;
+  border: none;
+  padding: 6px 12px;
+  border-radius: 6px;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.btn-danger:hover {
+  background: #b91c1c;
+}
+
+.btn-small {
+  padding: 4px 8px;
+  font-size: 12px;
+  margin-top: 8px;
+}
+
 .composer-hint {
   font-size: 13px;
   color: var(--muted);
@@ -1548,11 +1710,20 @@ select {
 
 
 .math-block {
-  margin: 0.6em 0;
+  display: block;
+  margin: 1em 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  text-align: center;
 }
 
 .math-block .katex-display {
-  margin: 0.4em 0;
+  margin: 0;
+}
+
+.math-block .katex {
+  display: inline-block;
+  text-align: left;
 }
 
 /* Wide screen mode */

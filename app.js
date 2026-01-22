@@ -20,6 +20,7 @@ const hljsThemeLink = document.getElementById("hljs-theme");
 const chatContextMenu = document.getElementById("chatContextMenu");
 const deleteChatBtn = document.getElementById("deleteChatBtn");
 const renameChatBtn = document.getElementById("renameChatBtn");
+const starChatBtn = document.getElementById("starChatBtn");
 const tokenPill = document.getElementById("tokenPill");
 const timerEl = document.getElementById("timer");
 const settingsPanel = document.getElementById("settingsPanel");
@@ -42,6 +43,19 @@ const vectorStoreInfo = document.getElementById("vectorStoreInfo");
 const refreshFilesBtn = document.getElementById("refreshFilesBtn");
 const clearVectorStoreBtn = document.getElementById("clearVectorStoreBtn");
 const newVectorStoreBtn = document.getElementById("newVectorStoreBtn");
+const shareBtn = document.getElementById("shareBtn");
+const shareModal = document.getElementById("shareModal");
+const closeShareModalBtn = document.getElementById("closeShareModalBtn");
+const copyMarkdownBtn = document.getElementById("copyMarkdownBtn");
+const downloadMarkdownBtn = document.getElementById("downloadMarkdownBtn");
+const downloadHtmlBtn = document.getElementById("downloadHtmlBtn");
+const downloadJsonBtn = document.getElementById("downloadJsonBtn");
+const copyLinkBtn = document.getElementById("copyLinkBtn");
+const importJsonBtn = document.getElementById("importJsonBtn");
+const importJsonInput = document.getElementById("importJsonInput");
+const linkStorageBtn = document.getElementById("linkStorageBtn");
+const unlinkStorageBtn = document.getElementById("unlinkStorageBtn");
+const storageStatus = document.getElementById("storageStatus");
 
 const STORAGE_KEY = "keychat.apiKey";
 const MODEL_KEY = "keychat.model";
@@ -59,6 +73,9 @@ const CODE_INTERPRETER_KEY = "keychat.codeInterpreter";
 const FILE_SEARCH_KEY = "keychat.fileSearch";
 const VECTOR_STORE_KEY = "keychat.vectorStore";
 const OPFS_FILE_NAME = "weichat-history.json";
+const LINKED_STORAGE_FILE = "weichat-sessions.json";
+const IDB_NAME = "weichat-storage";
+const IDB_STORE = "handles";
 
 const HLJS_THEMES = {
   light: "https://cdn.jsdelivr.net/npm/highlight.js@11.9.0/styles/github.min.css",
@@ -73,11 +90,202 @@ const state = {
   loadingAttachments: 0,
   sending: false,
   contextSessionId: null,
+  linkedDirHandle: null,
 };
 
 let fileSavePromise = Promise.resolve();
 let timerStart = null;
 let timerInterval = null;
+
+// IndexedDB helpers for storing directory handle
+function openIDB() {
+  return new Promise((resolve, reject) => {
+    const request = indexedDB.open(IDB_NAME, 1);
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+    request.onupgradeneeded = (event) => {
+      const db = event.target.result;
+      if (!db.objectStoreNames.contains(IDB_STORE)) {
+        db.createObjectStore(IDB_STORE);
+      }
+    };
+  });
+}
+
+async function saveHandleToIDB(handle) {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    const store = tx.objectStore(IDB_STORE);
+    const request = store.put(handle, "dirHandle");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+async function getHandleFromIDB() {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readonly");
+    const store = tx.objectStore(IDB_STORE);
+    const request = store.get("dirHandle");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve(request.result);
+  });
+}
+
+async function removeHandleFromIDB() {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, "readwrite");
+    const store = tx.objectStore(IDB_STORE);
+    const request = store.delete("dirHandle");
+    request.onerror = () => reject(request.error);
+    request.onsuccess = () => resolve();
+  });
+}
+
+// File System Access API helpers
+async function linkStorageFolder() {
+  if (!window.showDirectoryPicker) {
+    setStatus("File System Access not supported in this browser.");
+    return false;
+  }
+  try {
+    const handle = await window.showDirectoryPicker({ mode: "readwrite" });
+    state.linkedDirHandle = handle;
+    await saveHandleToIDB(handle);
+    updateStorageUI();
+
+    // Check if there's existing data in the folder
+    try {
+      const fileHandle = await handle.getFileHandle(LINKED_STORAGE_FILE);
+      const file = await fileHandle.getFile();
+      const text = await file.text();
+      const payload = parseSessionsPayload(text);
+
+      if (Array.isArray(payload.sessions) && payload.sessions.length > 0) {
+        // Found existing sessions - load them
+        state.sessions = normalizeStoredSessions(payload.sessions);
+        state.activeSessionId = payload.activeSessionId || state.sessions[0]?.id;
+        const activeSession = state.sessions.find(s => s.id === state.activeSessionId);
+        state.messages = activeSession ? activeSession.messages : [];
+
+        // Update localStorage too
+        localStorage.setItem(SESSIONS_KEY, JSON.stringify(state.sessions));
+        localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId || "");
+
+        renderChatList();
+        renderChatMessages();
+        setStatus(`Loaded ${state.sessions.length} session(s) from linked folder.`);
+        return true;
+      }
+    } catch (e) {
+      // File doesn't exist yet, that's okay - save current sessions
+    }
+
+    // No existing data - save current sessions to the linked folder
+    await saveToLinkedStorage();
+    setStatus("Storage folder linked successfully!");
+    return true;
+  } catch (error) {
+    if (error.name !== "AbortError") {
+      setStatus(`Failed to link folder: ${error.message}`);
+    }
+    return false;
+  }
+}
+
+async function unlinkStorageFolder() {
+  state.linkedDirHandle = null;
+  await removeHandleFromIDB();
+  updateStorageUI();
+  setStatus("Storage folder unlinked. Using browser storage.");
+}
+
+async function restoreLinkedStorage() {
+  try {
+    const handle = await getHandleFromIDB();
+    if (!handle) return false;
+
+    // Verify we still have permission
+    const permission = await handle.queryPermission({ mode: "readwrite" });
+    if (permission === "granted") {
+      state.linkedDirHandle = handle;
+      updateStorageUI();
+      return true;
+    }
+
+    // Try to request permission
+    const requested = await handle.requestPermission({ mode: "readwrite" });
+    if (requested === "granted") {
+      state.linkedDirHandle = handle;
+      updateStorageUI();
+      return true;
+    }
+
+    return false;
+  } catch (error) {
+    console.error("Failed to restore linked storage:", error);
+    return false;
+  }
+}
+
+async function saveToLinkedStorage() {
+  if (!state.linkedDirHandle) return;
+
+  try {
+    const fileHandle = await state.linkedDirHandle.getFileHandle(LINKED_STORAGE_FILE, { create: true });
+    const writable = await fileHandle.createWritable();
+    const payload = serializeSessions();
+    await writable.write(payload);
+    await writable.close();
+  } catch (error) {
+    console.error("Failed to save to linked storage:", error);
+    setStatus(`Auto-save failed: ${error.message}`);
+  }
+}
+
+async function loadFromLinkedStorage() {
+  if (!state.linkedDirHandle) return null;
+
+  try {
+    const fileHandle = await state.linkedDirHandle.getFileHandle(LINKED_STORAGE_FILE);
+    const file = await fileHandle.getFile();
+    const text = await file.text();
+    const payload = parseSessionsPayload(text);
+    if (!Array.isArray(payload.sessions)) {
+      return null;
+    }
+    return {
+      sessions: normalizeStoredSessions(payload.sessions),
+      activeSessionId: payload.activeSessionId,
+    };
+  } catch (error) {
+    // File doesn't exist yet, that's okay
+    if (error.name === "NotFoundError") {
+      return null;
+    }
+    console.error("Failed to load from linked storage:", error);
+    return null;
+  }
+}
+
+function updateStorageUI() {
+  if (!storageStatus || !linkStorageBtn || !unlinkStorageBtn) return;
+
+  if (state.linkedDirHandle) {
+    storageStatus.textContent = `Linked: ${state.linkedDirHandle.name}`;
+    storageStatus.classList.add("linked");
+    linkStorageBtn.textContent = "Change folder...";
+    unlinkStorageBtn.hidden = false;
+  } else {
+    storageStatus.textContent = "Using browser storage";
+    storageStatus.classList.remove("linked");
+    linkStorageBtn.textContent = "Link folder...";
+    unlinkStorageBtn.hidden = true;
+  }
+}
 
 function setStatus(text) {
   statusEl.textContent = text;
@@ -332,10 +540,15 @@ function stashMathSegments(text, stashed) {
     return count % 2 === 1;
   };
 
-  const pushStash = (segment) => {
+  const pushStash = (segment, isDisplay = false) => {
     const token = `@@STASH${stashed.length}@@`;
-    stashed.push(segment);
-    return token;
+    // Wrap display math in a div to ensure block rendering
+    if (isDisplay) {
+      stashed.push(`<div class="math-block">${segment}</div>`);
+    } else {
+      stashed.push(segment);
+    }
+    return isDisplay ? `\n\n${token}\n\n` : token;
   };
 
   let output = "";
@@ -345,7 +558,7 @@ function stashMathSegments(text, stashed) {
     if (text.startsWith("$$", i)) {
       const end = text.indexOf("$$", i + 2);
       if (end !== -1) {
-        output += pushStash(text.slice(i, end + 2));
+        output += pushStash(text.slice(i, end + 2), true);
         i = end + 2;
         continue;
       }
@@ -357,7 +570,7 @@ function stashMathSegments(text, stashed) {
     if (text.startsWith("\\[", i)) {
       const end = text.indexOf("\\]", i + 2);
       if (end !== -1) {
-        output += pushStash(text.slice(i, end + 2));
+        output += pushStash(text.slice(i, end + 2), true);
         i = end + 2;
         continue;
       }
@@ -369,7 +582,7 @@ function stashMathSegments(text, stashed) {
     if (text.startsWith("\\(", i)) {
       const end = text.indexOf("\\)", i + 2);
       if (end !== -1) {
-        output += pushStash(text.slice(i, end + 2));
+        output += pushStash(text.slice(i, end + 2), false);
         i = end + 2;
         continue;
       }
@@ -608,6 +821,15 @@ function renderMarkdownInto(el, text) {
         ],
         throwOnError: false,
         strict: "ignore",
+        macros: {
+          "\\mathbbm": "\\mathbb",
+          "\\R": "\\mathbb{R}",
+          "\\N": "\\mathbb{N}",
+          "\\Z": "\\mathbb{Z}",
+          "\\Q": "\\mathbb{Q}",
+          "\\C": "\\mathbb{C}",
+          "\\1": "\\mathbb{1}",
+        },
       });
     } catch (error) {
       // Ignore math rendering errors to avoid blocking text output.
@@ -809,16 +1031,45 @@ function parseUserContent(content) {
   return { text: textParts.join(""), attachments };
 }
 
+function stripCitationArtifacts(text) {
+  if (!text) return text;
+  return text
+    // Remove filecite patterns with surrounding special chars
+    .replace(/[\u2580-\u259F\u2500-\u257F]*filecite[\w\u2580-\u259F\u2500-\u257F]*/gi, "")
+    // Remove OpenAI citation markers like "【4:0†source】" or "【turn1file8†source】"
+    .replace(/【[^】]*†[^】]*】/g, "")
+    // Remove bracketed citations like "[turn1file8]"
+    .replace(/\[turn\d+file\d+\]/gi, "")
+    // Remove standalone citation refs like "turn1file8"
+    .replace(/\bturn\d+file\d+\b/gi, "")
+    // Remove box drawing, block elements, and special Unicode chars
+    .replace(/[\u2500-\u257F\u2580-\u259F\uFFFC\uFFFD\u2400-\u243F]/g, "")
+    // Remove Private Use Area characters (BMP and supplementary)
+    .replace(/[\uE000-\uF8FF]/g, "")
+    // Remove tag characters (U+E0000-U+E007F) - these show as boxes with letters
+    .replace(/[\u{E0000}-\u{E007F}]/gu, "")
+    // Remove variation selectors and other format chars
+    .replace(/[\uFE00-\uFE0F\u200B-\u200F\u2028-\u202F]/g, "")
+    // Clean up multiple spaces on same line (preserve newlines)
+    .replace(/[^\S\n]+/g, " ")
+    // Clean up multiple blank lines
+    .replace(/\n{3,}/g, "\n\n")
+    // Clean up spaces around punctuation
+    .replace(/\s+\./g, ".")
+    .replace(/\s+,/g, ",")
+    .trim();
+}
+
 function extractAssistantText(content) {
   if (typeof content === "string") {
-    return content;
+    return stripCitationArtifacts(content);
   }
 
   if (!Array.isArray(content)) {
     return "";
   }
 
-  return content
+  const text = content
     .map((part) => {
       if (part.type === "output_text" && typeof part.text === "string") {
         return part.text;
@@ -833,6 +1084,8 @@ function extractAssistantText(content) {
     })
     .join("")
     .trim();
+
+  return stripCitationArtifacts(text);
 }
 
 function normalizeUserContent(content) {
@@ -1156,7 +1409,34 @@ async function removeFileFromVectorStore(apiKey, vectorStoreId, fileId) {
     throw new Error("Failed to remove file");
   }
 
+  // Also remove from session's tracked files
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  if (session && session.uploadedFiles) {
+    session.uploadedFiles = session.uploadedFiles.filter(f => f.fileId !== fileId);
+    saveSessions();
+  }
+
   return response.json();
+}
+
+function trackUploadedFile(fileId, fileName, fileSize) {
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  if (!session) return;
+
+  if (!session.uploadedFiles) {
+    session.uploadedFiles = [];
+  }
+
+  // Avoid duplicates
+  if (!session.uploadedFiles.some(f => f.fileId === fileId)) {
+    session.uploadedFiles.push({
+      fileId,
+      fileName,
+      fileSize,
+      uploadedAt: Date.now()
+    });
+    saveSessions();
+  }
 }
 
 async function deleteVectorStore(apiKey, vectorStoreId) {
@@ -1185,6 +1465,7 @@ async function renderFileManagerList() {
   const apiKey = apiKeyInput.value.trim();
   const vectorStoreId = getCurrentVectorStoreId();
   const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  const storedFiles = session?.uploadedFiles || [];
 
   if (!apiKey) {
     fileManagerList.innerHTML = '<div class="file-manager-empty">Add API key to manage files</div>';
@@ -1192,59 +1473,118 @@ async function renderFileManagerList() {
     return;
   }
 
-  if (!vectorStoreId) {
+  // If no vector store but we have stored files, show them
+  if (!vectorStoreId && storedFiles.length === 0) {
     fileManagerList.innerHTML = '<div class="file-manager-empty">No vector store for this chat. Upload files with File Search enabled.</div>';
     vectorStoreInfo.textContent = `Chat: ${session?.title || 'Unknown'} - No vector store`;
     return;
   }
 
-  vectorStoreInfo.textContent = `Chat: ${session?.title || 'Global'} - ${vectorStoreId.slice(0, 16)}...`;
+  vectorStoreInfo.textContent = `Chat: ${session?.title || 'Global'} - ${vectorStoreId ? vectorStoreId.slice(0, 16) + '...' : 'Local only'}`;
   fileManagerList.innerHTML = '<div class="file-manager-empty">Loading files...</div>';
 
   try {
-    const files = await listVectorStoreFiles(apiKey, vectorStoreId);
+    let files = [];
+    if (vectorStoreId) {
+      files = await listVectorStoreFiles(apiKey, vectorStoreId);
+    }
 
-    if (files.length === 0) {
+    // Merge with stored file metadata for filenames
+    const storedFilesMap = new Map(storedFiles.map(f => [f.fileId, f]));
+
+    if (files.length === 0 && storedFiles.length === 0) {
       fileManagerList.innerHTML = '<div class="file-manager-empty">No files in vector store</div>';
       return;
     }
 
     fileManagerList.innerHTML = "";
 
-    for (const file of files) {
-      const fileInfo = await getFileInfo(apiKey, file.id);
-      const item = document.createElement("div");
-      item.className = "file-manager-item";
+    // If we have API files, use them with stored metadata for names
+    if (files.length > 0) {
+      for (const file of files) {
+        const storedFile = storedFilesMap.get(file.id);
+        let fileInfo = null;
+        let fileName = storedFile?.fileName || file.id;
+        let fileSize = storedFile?.fileSize;
 
-      const statusClass = file.status === "completed" ? "" : " processing";
-      const statusText = file.status === "completed" ? "Ready" : file.status;
-
-      item.innerHTML = `
-        <span class="file-icon">📄</span>
-        <div class="file-info">
-          <div class="file-name">${fileInfo?.filename || file.id}</div>
-          <div class="file-meta">${fileInfo ? formatFileSize(fileInfo.bytes) : "Unknown size"}</div>
-        </div>
-        <span class="file-status${statusClass}">${statusText}</span>
-        <button type="button" class="ghost small file-remove" data-file-id="${file.id}">Remove</button>
-      `;
-
-      item.querySelector(".file-remove").addEventListener("click", async () => {
-        if (confirm("Remove this file from the vector store?")) {
-          try {
-            await removeFileFromVectorStore(apiKey, vectorStoreId, file.id);
-            setStatus("File removed from vector store.");
-            renderFileManagerList();
-          } catch (error) {
-            setStatus(`Failed to remove file: ${error.message}`);
-          }
+        // Try to get file info from API if we don't have stored data
+        if (!storedFile) {
+          fileInfo = await getFileInfo(apiKey, file.id);
+          fileName = fileInfo?.filename || file.id;
+          fileSize = fileInfo?.bytes;
         }
-      });
 
-      fileManagerList.appendChild(item);
+        const item = document.createElement("div");
+        item.className = "file-manager-item";
+
+        const statusClass = file.status === "completed" ? "" : " processing";
+        const statusText = file.status === "completed" ? "Ready" : file.status;
+
+        item.innerHTML = `
+          <span class="file-icon">📄</span>
+          <div class="file-info">
+            <div class="file-name">${fileName}</div>
+            <div class="file-meta">${fileSize ? formatFileSize(fileSize) : "Unknown size"}</div>
+          </div>
+          <span class="file-status${statusClass}">${statusText}</span>
+          <button type="button" class="ghost small file-remove" data-file-id="${file.id}">Remove</button>
+        `;
+
+        item.querySelector(".file-remove").addEventListener("click", async () => {
+          if (confirm("Remove this file from the vector store?")) {
+            try {
+              await removeFileFromVectorStore(apiKey, vectorStoreId, file.id);
+              setStatus("File removed from vector store.");
+              renderFileManagerList();
+            } catch (error) {
+              setStatus(`Failed to remove file: ${error.message}`);
+            }
+          }
+        });
+
+        fileManagerList.appendChild(item);
+      }
+    } else {
+      // No API files but we have stored metadata - show them as cached
+      for (const storedFile of storedFiles) {
+        const item = document.createElement("div");
+        item.className = "file-manager-item";
+
+        item.innerHTML = `
+          <span class="file-icon">📄</span>
+          <div class="file-info">
+            <div class="file-name">${storedFile.fileName}</div>
+            <div class="file-meta">${storedFile.fileSize ? formatFileSize(storedFile.fileSize) : "Unknown size"}</div>
+          </div>
+          <span class="file-status processing">Cached</span>
+        `;
+
+        fileManagerList.appendChild(item);
+      }
     }
   } catch (error) {
-    fileManagerList.innerHTML = `<div class="file-manager-empty">Error: ${error.message}</div>`;
+    // API error - fall back to stored files if available
+    if (storedFiles.length > 0) {
+      fileManagerList.innerHTML = "";
+      for (const storedFile of storedFiles) {
+        const item = document.createElement("div");
+        item.className = "file-manager-item";
+
+        item.innerHTML = `
+          <span class="file-icon">📄</span>
+          <div class="file-info">
+            <div class="file-name">${storedFile.fileName}</div>
+            <div class="file-meta">${storedFile.fileSize ? formatFileSize(storedFile.fileSize) : "Unknown size"}</div>
+          </div>
+          <span class="file-status processing">Cached</span>
+        `;
+
+        fileManagerList.appendChild(item);
+      }
+      vectorStoreInfo.textContent += " (offline)";
+    } else {
+      fileManagerList.innerHTML = `<div class="file-manager-empty">Error: ${error.message}</div>`;
+    }
   }
 }
 
@@ -1308,6 +1648,9 @@ async function uploadFolderFiles(files) {
         const vectorStoreId = await getOrCreateVectorStore(apiKey);
         await addFileToVectorStore(apiKey, vectorStoreId, fileId);
       }
+
+      // Track the uploaded file in session
+      trackUploadedFile(fileId, file.name, file.size);
 
       uploaded++;
     } catch (error) {
@@ -1384,6 +1727,9 @@ function addAttachment(file) {
         attachment.uploading = false;
         setStatus("File uploaded.");
 
+        // Track the uploaded file in session
+        trackUploadedFile(fileId, file.name, file.size);
+
         // Add to vector store
         try {
           setStatus("Adding file to search index...");
@@ -1439,6 +1785,9 @@ function addAttachment(file) {
 
         // Add to vector store if file search is enabled
         if (fileSearchToggle && fileSearchToggle.checked) {
+          // Track the uploaded file in session
+          trackUploadedFile(fileId, file.name, file.size);
+
           try {
             setStatus("Adding file to search index...");
             const vectorStoreId = await getOrCreateVectorStore(apiKey);
@@ -1520,7 +1869,7 @@ function summarizeTitle(text) {
   if (!trimmed) {
     return "New chat";
   }
-  return trimmed.length > 42 ? `${trimmed.slice(0, 42)}...` : trimmed;
+  return trimmed.length > 30 ? `${trimmed.slice(0, 30)}...` : trimmed;
 }
 
 function deriveTitleFromMessages(messages) {
@@ -1553,7 +1902,7 @@ async function generateChatTitle(userMessage, apiKey) {
         input: [
           {
             role: "user",
-            content: `Generate a very short title (3-6 words max) for a chat that starts with this message. Return ONLY the title, no quotes or punctuation:\n\n${userMessage.slice(0, 500)}`,
+            content: `Create a 2-4 word title for this chat. Rules: NO quotes, NO punctuation, NO articles (a/an/the), MAX 25 characters. Just output the title.\n\nMessage: ${userMessage.slice(0, 300)}`,
           },
         ],
       }),
@@ -1568,7 +1917,7 @@ async function generateChatTitle(userMessage, apiKey) {
       data?.output?.find?.(o => o.type === "message")?.content?.[0]?.text;
 
     if (outputText) {
-      const title = outputText.trim().replace(/^["']|["']$/g, "").slice(0, 50);
+      const title = outputText.trim().replace(/^["']|["']$/g, "").replace(/[.!?:]+$/, "").slice(0, 30);
       return title || null;
     }
     return null;
@@ -1585,6 +1934,10 @@ function saveSessions() {
     setStatus("Warning: could not save chat history (storage limit).");
   }
   queueFileSave();
+  // Also save to linked storage if available
+  if (state.linkedDirHandle) {
+    saveToLinkedStorage();
+  }
 }
 
 function loadSessions() {
@@ -1638,12 +1991,29 @@ function setActiveSession(id, { persist = true } = {}) {
 
 function renderChatList() {
   chatList.innerHTML = "";
-  const sorted = [...state.sessions].sort((a, b) => b.updatedAt - a.updatedAt);
+  const sorted = [...state.sessions].sort((a, b) => {
+    // Starred items first
+    if (a.starred && !b.starred) return -1;
+    if (!a.starred && b.starred) return 1;
+    // Then by update time
+    return b.updatedAt - a.updatedAt;
+  });
 
   sorted.forEach((session) => {
-    const item = document.createElement("button");
-    item.type = "button";
-    item.className = `chat-item${session.id === state.activeSessionId ? " active" : ""}${session.parentSessionId ? " branched" : ""}`;
+    const item = document.createElement("div");
+    item.className = `chat-item${session.id === state.activeSessionId ? " active" : ""}${session.parentSessionId ? " branched" : ""}${session.starred ? " starred" : ""}`;
+
+    // Star button
+    const starBtn = document.createElement("button");
+    starBtn.type = "button";
+    starBtn.className = `chat-star${session.starred ? " active" : ""}`;
+    starBtn.textContent = session.starred ? "★" : "☆";
+    starBtn.title = session.starred ? "Unstar" : "Star";
+    starBtn.addEventListener("click", (e) => {
+      e.stopPropagation();
+      toggleStarSession(session.id);
+    });
+    item.appendChild(starBtn);
 
     // Add branch icon if this is a branched session
     if (session.parentSessionId) {
@@ -1682,6 +2052,16 @@ function renderChatList() {
   });
 }
 
+function toggleStarSession(sessionId) {
+  const session = state.sessions.find((s) => s.id === sessionId);
+  if (!session) return;
+
+  session.starred = !session.starred;
+  saveSessions();
+  renderChatList();
+  setStatus(session.starred ? "Chat starred." : "Chat unstarred.");
+}
+
 function ensureSession() {
   if (state.activeSessionId) {
     return;
@@ -1699,6 +2079,12 @@ function showChatContextMenu(x, y, sessionId) {
   chatContextMenu.style.left = `${x}px`;
   chatContextMenu.style.top = `${y}px`;
   chatContextMenu.hidden = false;
+
+  // Update star button text
+  if (starChatBtn) {
+    const session = state.sessions.find((s) => s.id === sessionId);
+    starChatBtn.textContent = session?.starred ? "Unstar chat" : "Star chat";
+  }
 }
 
 function hideChatContextMenu() {
@@ -1730,6 +2116,7 @@ function renameSession(sessionId) {
     return;
   }
   session.title = trimmed;
+  session.titleLocked = true;
   updateSessionMetadata(session);
   saveSessions();
   renderChatList();
@@ -2085,6 +2472,9 @@ async function sendAssistantResponse() {
       assistantText = refusalText;
     }
 
+    // Strip citation artifacts from the response
+    assistantText = stripCitationArtifacts(assistantText);
+
     if (!assistantText) {
       throw new Error("No text output received.");
     }
@@ -2218,9 +2608,9 @@ async function sendMessage() {
   renderAttachmentList();
 
   const session = state.sessions.find((item) => item.id === state.activeSessionId);
-  const isFirstMessage = session && (!session.title || session.title === "New chat");
+  const shouldAutoTitle = session && !session.titleLocked && (!session.title || session.title === "New chat");
   if (session) {
-    if (isFirstMessage) {
+    if (shouldAutoTitle) {
       session.title = summarizeTitle(userText || "New chat");
     }
     session.messages = state.messages;
@@ -2230,13 +2620,13 @@ async function sendMessage() {
   }
 
   // Auto-generate chat title for first message
-  if (isFirstMessage && userText && session) {
+  if (shouldAutoTitle && userText && session) {
     const apiKey = apiKeyInput.value.trim();
     const sessionId = session.id;
     generateChatTitle(userText, apiKey).then((generatedTitle) => {
       if (generatedTitle) {
         const targetSession = state.sessions.find((s) => s.id === sessionId);
-        if (targetSession && targetSession.title !== generatedTitle) {
+        if (targetSession && !targetSession.titleLocked && targetSession.title !== generatedTitle) {
           targetSession.title = generatedTitle;
           saveSessions();
           renderChatList();
@@ -2332,23 +2722,50 @@ async function initialize() {
   applyTheme(savedTheme);
 
   let loadedFromFile = false;
-  const filePayload = await loadSessionsFromOpfs({ silent: true });
-  if (filePayload) {
-    state.sessions = filePayload.sessions;
-    if (state.sessions.length === 0) {
-      const session = createSession();
-      state.sessions.push(session);
-      state.activeSessionId = session.id;
-    } else {
-      const candidate = filePayload.activeSessionId || savedActiveSession;
-      const exists = candidate
-        ? state.sessions.some((session) => session.id === candidate)
-        : false;
-      state.activeSessionId = exists ? candidate : state.sessions[0].id;
+
+  // Try to restore linked storage first (highest priority)
+  const linkedRestored = await restoreLinkedStorage();
+  if (linkedRestored) {
+    const linkedPayload = await loadFromLinkedStorage();
+    if (linkedPayload) {
+      state.sessions = linkedPayload.sessions;
+      if (state.sessions.length === 0) {
+        const session = createSession();
+        state.sessions.push(session);
+        state.activeSessionId = session.id;
+      } else {
+        const candidate = linkedPayload.activeSessionId || savedActiveSession;
+        const exists = candidate
+          ? state.sessions.some((session) => session.id === candidate)
+          : false;
+        state.activeSessionId = exists ? candidate : state.sessions[0].id;
+      }
+      loadedFromFile = true;
+      setStatus("Loaded from linked folder.");
     }
-    loadedFromFile = true;
   }
 
+  // Fall back to OPFS
+  if (!loadedFromFile) {
+    const filePayload = await loadSessionsFromOpfs({ silent: true });
+    if (filePayload) {
+      state.sessions = filePayload.sessions;
+      if (state.sessions.length === 0) {
+        const session = createSession();
+        state.sessions.push(session);
+        state.activeSessionId = session.id;
+      } else {
+        const candidate = filePayload.activeSessionId || savedActiveSession;
+        const exists = candidate
+          ? state.sessions.some((session) => session.id === candidate)
+          : false;
+        state.activeSessionId = exists ? candidate : state.sessions[0].id;
+      }
+      loadedFromFile = true;
+    }
+  }
+
+  // Fall back to localStorage
   if (!loadedFromFile) {
     state.sessions = loadSessions();
     if (state.sessions.length === 0) {
@@ -2402,6 +2819,15 @@ if (clearBtn) {
   clearBtn.addEventListener("click", clearCurrentChat);
 }
 
+// Storage folder linking
+if (linkStorageBtn) {
+  linkStorageBtn.addEventListener("click", linkStorageFolder);
+}
+
+if (unlinkStorageBtn) {
+  unlinkStorageBtn.addEventListener("click", unlinkStorageFolder);
+}
+
 fileInput.addEventListener("change", () => {
   const files = Array.from(fileInput.files || []);
   files.forEach(addAttachment);
@@ -2441,6 +2867,15 @@ if (renameChatBtn) {
   renameChatBtn.addEventListener("click", () => {
     if (state.contextSessionId) {
       renameSession(state.contextSessionId);
+      hideChatContextMenu();
+    }
+  });
+}
+
+if (starChatBtn) {
+  starChatBtn.addEventListener("click", () => {
+    if (state.contextSessionId) {
+      toggleStarSession(state.contextSessionId);
       hideChatContextMenu();
     }
   });
@@ -2745,5 +3180,371 @@ if (newVectorStoreBtn) {
     } catch (error) {
       setStatus(`Failed to create vector store: ${error.message}`);
     }
+  });
+}
+
+// Share functionality
+function getConversationMarkdown() {
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  const title = session?.title || "Conversation";
+  const date = new Date().toLocaleDateString();
+
+  let markdown = `# ${title}\n\n`;
+  markdown += `*Exported from WeiChat on ${date}*\n\n---\n\n`;
+
+  state.messages.forEach((msg) => {
+    if (msg.role === "user") {
+      const { text } = parseUserContent(msg.content);
+      markdown += `## You\n\n${text || "*(attachment)*"}\n\n`;
+    } else if (msg.role === "assistant") {
+      const text = extractAssistantText(msg.content);
+      markdown += `## Wei\n\n${text}\n\n`;
+    }
+  });
+
+  return markdown;
+}
+
+function getConversationJson() {
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  return JSON.stringify({
+    title: session?.title || "Conversation",
+    exportedAt: new Date().toISOString(),
+    messages: state.messages,
+    usageTokens: session?.usageTokens || 0,
+  }, null, 2);
+}
+
+function getConversationHtml() {
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  const title = session?.title || "Conversation";
+  const date = new Date().toLocaleDateString();
+
+  let messagesHtml = "";
+  state.messages.forEach((msg) => {
+    if (msg.role === "user") {
+      const { text } = parseUserContent(msg.content);
+      messagesHtml += `
+        <div class="message user">
+          <div class="avatar">You</div>
+          <div class="content">${escapeHtml(text || "*(attachment)*")}</div>
+        </div>`;
+    } else if (msg.role === "assistant") {
+      const text = extractAssistantText(msg.content);
+      messagesHtml += `
+        <div class="message assistant">
+          <div class="avatar">Wei</div>
+          <div class="content">${escapeHtml(text)}</div>
+        </div>`;
+    }
+  });
+
+  return `<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${escapeHtml(title)} - WeiChat Export</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: #f5f5f5;
+      padding: 20px;
+      line-height: 1.6;
+    }
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background: white;
+      border-radius: 12px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      overflow: hidden;
+    }
+    .header {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 24px;
+    }
+    .header h1 { font-size: 24px; margin-bottom: 8px; }
+    .header p { opacity: 0.9; font-size: 14px; }
+    .messages { padding: 20px; }
+    .message {
+      display: flex;
+      gap: 12px;
+      margin-bottom: 20px;
+      padding-bottom: 20px;
+      border-bottom: 1px solid #eee;
+    }
+    .message:last-child { border-bottom: none; }
+    .avatar {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 12px;
+      flex-shrink: 0;
+    }
+    .user .avatar { background: #e3f2fd; color: #1976d2; }
+    .assistant .avatar { background: #f3e5f5; color: #7b1fa2; }
+    .content {
+      flex: 1;
+      white-space: pre-wrap;
+      word-break: break-word;
+    }
+    .footer {
+      background: #f9f9f9;
+      padding: 16px 24px;
+      text-align: center;
+      font-size: 12px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>${escapeHtml(title)}</h1>
+      <p>Exported from WeiChat on ${date}</p>
+    </div>
+    <div class="messages">
+      ${messagesHtml}
+    </div>
+    <div class="footer">
+      Exported from WeiChat
+    </div>
+  </div>
+</body>
+</html>`;
+}
+
+function escapeHtml(text) {
+  const div = document.createElement("div");
+  div.textContent = text;
+  return div.innerHTML;
+}
+
+function downloadFile(content, filename, mimeType) {
+  const blob = new Blob([content], { type: mimeType });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+function getShareableLink() {
+  const session = state.sessions.find((s) => s.id === state.activeSessionId);
+  const data = {
+    t: session?.title || "Chat",
+    m: state.messages.map(msg => ({
+      r: msg.role === "user" ? "u" : "a",
+      c: msg.role === "user" ? parseUserContent(msg.content).text : extractAssistantText(msg.content)
+    }))
+  };
+
+  try {
+    const compressed = btoa(encodeURIComponent(JSON.stringify(data)));
+    const url = new URL(window.location.href);
+    url.search = "";
+    url.hash = `share=${compressed}`;
+    return url.toString();
+  } catch (e) {
+    return null;
+  }
+}
+
+function openShareModal() {
+  if (state.messages.length === 0) {
+    setStatus("No messages to share.");
+    return;
+  }
+  shareModal.hidden = false;
+}
+
+function closeShareModal() {
+  shareModal.hidden = true;
+}
+
+// Share modal event listeners
+if (shareBtn) {
+  shareBtn.addEventListener("click", openShareModal);
+}
+
+if (closeShareModalBtn) {
+  closeShareModalBtn.addEventListener("click", closeShareModal);
+}
+
+if (shareModal) {
+  shareModal.querySelector(".modal-backdrop").addEventListener("click", closeShareModal);
+}
+
+if (copyMarkdownBtn) {
+  copyMarkdownBtn.addEventListener("click", async () => {
+    try {
+      await navigator.clipboard.writeText(getConversationMarkdown());
+      setStatus("Markdown copied to clipboard!");
+      closeShareModal();
+    } catch (e) {
+      setStatus("Failed to copy to clipboard.");
+    }
+  });
+}
+
+if (downloadMarkdownBtn) {
+  downloadMarkdownBtn.addEventListener("click", () => {
+    const session = state.sessions.find((s) => s.id === state.activeSessionId);
+    const filename = `${(session?.title || "conversation").replace(/[^a-z0-9]/gi, "_")}.md`;
+    downloadFile(getConversationMarkdown(), filename, "text/markdown");
+    setStatus("Markdown file downloaded!");
+    closeShareModal();
+  });
+}
+
+if (downloadHtmlBtn) {
+  downloadHtmlBtn.addEventListener("click", () => {
+    const session = state.sessions.find((s) => s.id === state.activeSessionId);
+    const filename = `${(session?.title || "conversation").replace(/[^a-z0-9]/gi, "_")}.html`;
+    downloadFile(getConversationHtml(), filename, "text/html");
+    setStatus("HTML file downloaded!");
+    closeShareModal();
+  });
+}
+
+if (downloadJsonBtn) {
+  downloadJsonBtn.addEventListener("click", () => {
+    const session = state.sessions.find((s) => s.id === state.activeSessionId);
+    const filename = `${(session?.title || "conversation").replace(/[^a-z0-9]/gi, "_")}.json`;
+    downloadFile(getConversationJson(), filename, "application/json");
+    setStatus("JSON file downloaded!");
+    closeShareModal();
+  });
+}
+
+if (copyLinkBtn) {
+  copyLinkBtn.addEventListener("click", async () => {
+    const link = getShareableLink();
+    if (!link) {
+      setStatus("Conversation too large for URL sharing. Use download instead.");
+      return;
+    }
+
+    if (link.length > 8000) {
+      setStatus("Conversation too large for URL sharing. Use download instead.");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(link);
+      setStatus("Share link copied to clipboard!");
+      closeShareModal();
+    } catch (e) {
+      setStatus("Failed to copy link.");
+    }
+  });
+}
+
+// Load shared conversation from URL on startup
+function loadSharedConversation() {
+  const hash = window.location.hash;
+  if (!hash.startsWith("#share=")) return;
+
+  try {
+    const compressed = hash.slice(7);
+    const data = JSON.parse(decodeURIComponent(atob(compressed)));
+
+    if (data.m && Array.isArray(data.m)) {
+      const messages = data.m.map(msg => ({
+        role: msg.r === "u" ? "user" : "assistant",
+        content: msg.c
+      }));
+
+      // Create a new session with the shared conversation
+      const session = createSession(data.t || "Shared Chat");
+      session.messages = messages;
+      state.sessions.unshift(session);
+      saveSessions();
+      setActiveSession(session.id);
+
+      // Clear the hash
+      window.location.hash = "";
+      setStatus("Loaded shared conversation!");
+    }
+  } catch (e) {
+    console.error("Failed to load shared conversation:", e);
+  }
+}
+
+// Call on startup
+loadSharedConversation();
+
+// Import JSON conversation
+function importConversationFromJson(jsonString) {
+  try {
+    const data = JSON.parse(jsonString);
+
+    if (!data.messages || !Array.isArray(data.messages)) {
+      throw new Error("Invalid JSON format: missing messages array");
+    }
+
+    // Normalize messages
+    const messages = data.messages.map(msg => {
+      if (msg.role === "user") {
+        return { ...msg, content: normalizeUserContent(msg.content) };
+      } else if (msg.role === "assistant") {
+        return { ...msg, content: normalizeAssistantContent(msg.content) };
+      }
+      return msg;
+    });
+
+    // Create new session with imported messages
+    const session = createSession(data.title || "Imported Chat");
+    session.messages = messages;
+    session.usageTokens = data.usageTokens || 0;
+    session.importedAt = Date.now();
+
+    state.sessions.unshift(session);
+    saveSessions();
+    setActiveSession(session.id);
+
+    setStatus("Conversation imported successfully!");
+    return true;
+  } catch (error) {
+    setStatus(`Import failed: ${error.message}`);
+    return false;
+  }
+}
+
+if (importJsonBtn) {
+  importJsonBtn.addEventListener("click", () => {
+    importJsonInput.click();
+  });
+}
+
+if (importJsonInput) {
+  importJsonInput.addEventListener("change", () => {
+    const file = importJsonInput.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const success = importConversationFromJson(e.target.result);
+      if (success) {
+        closeShareModal();
+      }
+    };
+    reader.onerror = () => {
+      setStatus("Failed to read file.");
+    };
+    reader.readAsText(file);
+
+    // Reset input so same file can be selected again
+    importJsonInput.value = "";
   });
 }
