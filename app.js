@@ -56,6 +56,17 @@ const importJsonInput = document.getElementById("importJsonInput");
 const linkStorageBtn = document.getElementById("linkStorageBtn");
 const unlinkStorageBtn = document.getElementById("unlinkStorageBtn");
 const storageStatus = document.getElementById("storageStatus");
+const newProjectBtn = document.getElementById("newProjectBtn");
+const groupContextMenu = document.getElementById("groupContextMenu");
+const renameGroupBtn = document.getElementById("renameGroupBtn");
+const deleteGroupBtn = document.getElementById("deleteGroupBtn");
+const moveToProjectBtn = document.getElementById("moveToProjectBtn");
+const removeFromProjectBtn = document.getElementById("removeFromProjectBtn");
+const moveToProjectModal = document.getElementById("moveToProjectModal");
+const closeMoveModalBtn = document.getElementById("closeMoveModalBtn");
+const projectList = document.getElementById("projectList");
+const createProjectFromMoveBtn = document.getElementById("createProjectFromMoveBtn");
+const sidebarResizer = document.getElementById("sidebarResizer");
 
 const STORAGE_KEY = "keychat.apiKey";
 const MODEL_KEY = "keychat.model";
@@ -63,10 +74,12 @@ const SYSTEM_KEY = "keychat.system";
 const REASONING_KEY = "keychat.reasoning";
 const THEME_KEY = "keychat.theme";
 const SESSIONS_KEY = "keychat.sessions";
+const GROUPS_KEY = "keychat.groups";
 const ACTIVE_SESSION_KEY = "keychat.activeSession";
 const WIDE_SCREEN_KEY = "keychat.wideScreen";
 const COMPOSER_HEIGHT_KEY = "keychat.composerHeight";
 const SIDEBAR_COLLAPSED_KEY = "keychat.sidebarCollapsed";
+const SIDEBAR_WIDTH_KEY = "keychat.sidebarWidth";
 const FONT_SIZE_KEY = "keychat.fontSize";
 const WEB_SEARCH_KEY = "keychat.webSearch";
 const CODE_INTERPRETER_KEY = "keychat.codeInterpreter";
@@ -84,12 +97,16 @@ const HLJS_THEMES = {
 
 const state = {
   sessions: [],
+  groups: [],
   activeSessionId: null,
   messages: [],
   attachments: [],
   loadingAttachments: 0,
   sending: false,
+  generatingSessionId: null,
+  pendingMessage: null, // Stores the pending message state for the generating session
   contextSessionId: null,
+  contextGroupId: null,
   linkedDirHandle: null,
 };
 
@@ -167,12 +184,14 @@ async function linkStorageFolder() {
       if (Array.isArray(payload.sessions) && payload.sessions.length > 0) {
         // Found existing sessions - load them
         state.sessions = normalizeStoredSessions(payload.sessions);
+        state.groups = payload.groups || [];
         state.activeSessionId = payload.activeSessionId || state.sessions[0]?.id;
         const activeSession = state.sessions.find(s => s.id === state.activeSessionId);
         state.messages = activeSession ? activeSession.messages : [];
 
         // Update localStorage too
         localStorage.setItem(SESSIONS_KEY, JSON.stringify(state.sessions));
+        localStorage.setItem(GROUPS_KEY, JSON.stringify(state.groups));
         localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId || "");
 
         renderChatList();
@@ -259,6 +278,7 @@ async function loadFromLinkedStorage() {
     }
     return {
       sessions: normalizeStoredSessions(payload.sessions),
+      groups: payload.groups || [],
       activeSessionId: payload.activeSessionId,
     };
   } catch (error) {
@@ -328,8 +348,9 @@ async function getOpfsFileHandle(create = false) {
 
 function serializeSessions() {
   return JSON.stringify({
-    version: 2,
+    version: 3,
     sessions: state.sessions,
+    groups: state.groups,
     activeSessionId: state.activeSessionId,
   });
 }
@@ -337,15 +358,23 @@ function serializeSessions() {
 function parseSessionsPayload(text) {
   const parsed = JSON.parse(text);
   if (Array.isArray(parsed)) {
-    return { sessions: parsed, activeSessionId: null };
+    return { sessions: parsed, groups: [], activeSessionId: null };
   }
   if (parsed && Array.isArray(parsed.sessions)) {
+    const groups = parsed.groups || [];
+    // Clean up any null/undefined session IDs in groups
+    groups.forEach(group => {
+      if (Array.isArray(group.sessionIds)) {
+        group.sessionIds = group.sessionIds.filter(id => id != null);
+      }
+    });
     return {
       sessions: parsed.sessions,
+      groups: groups,
       activeSessionId: parsed.activeSessionId || null,
     };
   }
-  return { sessions: [], activeSessionId: null };
+  return { sessions: [], groups: [], activeSessionId: null };
 }
 
 function queueFileSave() {
@@ -382,6 +411,7 @@ async function loadSessionsFromOpfs({ silent = false } = {}) {
     }
     return {
       sessions: normalizeStoredSessions(payload.sessions),
+      groups: payload.groups || [],
       activeSessionId: payload.activeSessionId,
     };
   } catch (error) {
@@ -997,6 +1027,25 @@ function renderChatMessages() {
       });
     }
   });
+
+  // If we're viewing the generating session, restore the pending message
+  if (state.generatingSessionId === state.activeSessionId && state.pendingMessage) {
+    const reasoningEnabled = state.pendingMessage.thinkingPanel !== null;
+    const pending = addMessage("assistant", state.pendingMessage.assistantText || state.pendingMessage.refusalText || "", {
+      pending: true,
+      thinking: reasoningEnabled
+    });
+
+    // Restore thinking text if present
+    if (reasoningEnabled && state.pendingMessage.thinkingText && pending.thinking) {
+      pending.thinking.details.open = true;
+      pending.thinking.summaryText.textContent = state.pendingMessage.thinkingText;
+    }
+
+    // Update the stored reference to the new DOM elements
+    state.pendingMessage.pending = pending;
+    state.pendingMessage.thinkingPanel = pending.thinking;
+  }
 
   updateActionButtons();
   updateTokenPill();
@@ -1929,6 +1978,7 @@ async function generateChatTitle(userMessage, apiKey) {
 function saveSessions() {
   try {
     localStorage.setItem(SESSIONS_KEY, JSON.stringify(state.sessions));
+    localStorage.setItem(GROUPS_KEY, JSON.stringify(state.groups));
     localStorage.setItem(ACTIVE_SESSION_KEY, state.activeSessionId || "");
   } catch (error) {
     setStatus("Warning: could not save chat history (storage limit).");
@@ -1938,6 +1988,133 @@ function saveSessions() {
   if (state.linkedDirHandle) {
     saveToLinkedStorage();
   }
+}
+
+function loadGroups() {
+  const raw = localStorage.getItem(GROUPS_KEY);
+  if (!raw) {
+    return [];
+  }
+  try {
+    const groups = JSON.parse(raw);
+    if (!Array.isArray(groups)) {
+      return [];
+    }
+    // Clean up any null/undefined session IDs
+    groups.forEach(group => {
+      if (Array.isArray(group.sessionIds)) {
+        group.sessionIds = group.sessionIds.filter(id => id != null);
+      }
+    });
+    return groups;
+  } catch (error) {
+    return [];
+  }
+}
+
+function createGroup(name = "New Project") {
+  return {
+    id: crypto.randomUUID(),
+    name,
+    sessionIds: [],
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    collapsed: false,
+  };
+}
+
+function addSessionToGroup(sessionId, groupId) {
+  if (!sessionId) {
+    console.error('addSessionToGroup called with null/undefined sessionId');
+    return false;
+  }
+
+  const group = state.groups.find(g => g.id === groupId);
+  if (!group) return false;
+
+  // Verify session exists
+  const session = state.sessions.find(s => s.id === sessionId);
+  if (!session) {
+    console.error(`Session ${sessionId} not found in state.sessions`);
+    return false;
+  }
+
+  // Remove from any existing group first
+  removeSessionFromAllGroups(sessionId);
+
+  if (!group.sessionIds.includes(sessionId)) {
+    group.sessionIds.push(sessionId);
+    group.updatedAt = Date.now();
+    saveSessions();
+    renderChatList();
+  }
+  return true;
+}
+
+function removeSessionFromGroup(sessionId, groupId) {
+  const group = state.groups.find(g => g.id === groupId);
+  if (!group) return false;
+
+  const index = group.sessionIds.indexOf(sessionId);
+  if (index >= 0) {
+    group.sessionIds.splice(index, 1);
+    group.updatedAt = Date.now();
+    saveSessions();
+    renderChatList();
+  }
+  return true;
+}
+
+function removeSessionFromAllGroups(sessionId) {
+  for (const group of state.groups) {
+    const index = group.sessionIds.indexOf(sessionId);
+    if (index >= 0) {
+      group.sessionIds.splice(index, 1);
+      group.updatedAt = Date.now();
+    }
+  }
+}
+
+function deleteGroup(groupId) {
+  const index = state.groups.findIndex(g => g.id === groupId);
+  if (index >= 0) {
+    state.groups.splice(index, 1);
+    saveSessions();
+    renderChatList();
+  }
+}
+
+function renameGroup(groupId) {
+  const group = state.groups.find(g => g.id === groupId);
+  if (!group) return;
+
+  const newName = window.prompt("Rename project", group.name);
+  if (newName === null) return;
+
+  const trimmed = newName.trim();
+  if (!trimmed) {
+    setStatus("Project name unchanged.");
+    return;
+  }
+
+  group.name = trimmed;
+  group.updatedAt = Date.now();
+  saveSessions();
+  renderChatList();
+  setStatus("Project renamed.");
+}
+
+function toggleGroupCollapse(groupId) {
+  const group = state.groups.find(g => g.id === groupId);
+  if (!group) return;
+
+  group.collapsed = !group.collapsed;
+  saveSessions();
+  renderChatList();
+}
+
+function getSessionGroup(sessionId) {
+  return state.groups.find(g => g.sessionIds.includes(sessionId));
 }
 
 function loadSessions() {
@@ -1980,6 +2157,13 @@ function setActiveSession(id, { persist = true } = {}) {
   state.activeSessionId = id;
   state.messages = session.messages;
   state.attachments = [];
+
+  // Mark session as read
+  if (session.unread) {
+    session.unread = false;
+    persist = true;
+  }
+
   renderAttachmentList();
   messageInput.value = "";
   renderChatList();
@@ -1991,65 +2175,183 @@ function setActiveSession(id, { persist = true } = {}) {
 
 function renderChatList() {
   chatList.innerHTML = "";
-  const sorted = [...state.sessions].sort((a, b) => {
-    // Starred items first
-    if (a.starred && !b.starred) return -1;
-    if (!a.starred && b.starred) return 1;
-    // Then by update time
-    return b.updatedAt - a.updatedAt;
-  });
 
-  sorted.forEach((session) => {
-    const item = document.createElement("div");
-    item.className = `chat-item${session.id === state.activeSessionId ? " active" : ""}${session.parentSessionId ? " branched" : ""}${session.starred ? " starred" : ""}`;
+  // Get sessions in each group
+  const groupedSessionIds = new Set();
+  state.groups.forEach(g => g.sessionIds.forEach(id => groupedSessionIds.add(id)));
 
-    // Star button
-    const starBtn = document.createElement("button");
-    starBtn.type = "button";
-    starBtn.className = `chat-star${session.starred ? " active" : ""}`;
-    starBtn.textContent = session.starred ? "★" : "☆";
-    starBtn.title = session.starred ? "Unstar" : "Star";
-    starBtn.addEventListener("click", (e) => {
-      e.stopPropagation();
-      toggleStarSession(session.id);
-    });
-    item.appendChild(starBtn);
+  // Sort groups by update time
+  const sortedGroups = [...state.groups].sort((a, b) => b.updatedAt - a.updatedAt);
 
-    // Add branch icon if this is a branched session
-    if (session.parentSessionId) {
-      const branchIcon = document.createElement("span");
-      branchIcon.className = "branch-icon";
-      branchIcon.textContent = "⑂";
-      branchIcon.title = "Branched conversation";
-      item.appendChild(branchIcon);
+  // Render each group
+  sortedGroups.forEach((group) => {
+    const groupEl = document.createElement("div");
+    groupEl.className = `chat-group${group.collapsed ? " collapsed" : ""}`;
+    groupEl.dataset.groupId = group.id;
+
+    // Get sessions in this group first (so we can get accurate count)
+    const groupSessions = group.sessionIds
+      .map(id => state.sessions.find(s => s.id === id))
+      .filter(Boolean)
+      .sort((a, b) => {
+        if (a.starred && !b.starred) return -1;
+        if (!a.starred && b.starred) return 1;
+        return b.updatedAt - a.updatedAt;
+      });
+
+    // Clean up stale session IDs from the group (sessions that no longer exist)
+    if (groupSessions.length !== group.sessionIds.length) {
+      group.sessionIds = groupSessions.map(s => s.id);
     }
 
-    const titleSpan = document.createElement("span");
-    titleSpan.className = "chat-item-title";
-    titleSpan.textContent = session.title || "New chat";
-    item.appendChild(titleSpan);
+    // Group header
+    const header = document.createElement("div");
+    header.className = "chat-group-header";
 
-    item.addEventListener("click", () => {
-      if (state.sending) {
-        return;
-      }
-      setActiveSession(session.id);
+    const toggle = document.createElement("span");
+    toggle.className = "chat-group-toggle";
+    toggle.textContent = "▼";
+
+    const icon = document.createElement("span");
+    icon.className = "chat-group-icon";
+    icon.textContent = "📁";
+
+    const name = document.createElement("span");
+    name.className = "chat-group-name";
+    name.textContent = group.name;
+
+    const count = document.createElement("span");
+    count.className = "chat-group-count";
+    count.textContent = groupSessions.length; // Use actual session count, not sessionIds.length
+
+    header.appendChild(toggle);
+    header.appendChild(icon);
+    header.appendChild(name);
+    header.appendChild(count);
+
+    header.addEventListener("click", (e) => {
+      if (e.target.closest(".chat-item")) return;
+      toggleGroupCollapse(group.id);
     });
-    item.addEventListener("contextmenu", (event) => {
-      event.preventDefault();
-      if (state.sending) {
-        return;
-      }
-      showChatContextMenu(event.clientX, event.clientY, session.id);
+
+    header.addEventListener("contextmenu", (e) => {
+      e.preventDefault();
+      showGroupContextMenu(e.clientX, e.clientY, group.id);
     });
-    item.addEventListener("dblclick", () => {
-      if (state.sending) {
-        return;
-      }
-      renameSession(session.id);
+
+    header.addEventListener("dblclick", () => {
+      renameGroup(group.id);
     });
-    chatList.appendChild(item);
+
+    groupEl.appendChild(header);
+
+    // Group items (sessions in this group)
+    const items = document.createElement("div");
+    items.className = "chat-group-items";
+
+    groupSessions.forEach((session) => {
+      const item = createChatItem(session);
+      items.appendChild(item);
+    });
+
+    groupEl.appendChild(items);
+    chatList.appendChild(groupEl);
   });
+
+  // Get ungrouped sessions
+  const ungroupedSessions = state.sessions
+    .filter(s => !groupedSessionIds.has(s.id))
+    .sort((a, b) => {
+      if (a.starred && !b.starred) return -1;
+      if (!a.starred && b.starred) return 1;
+      return b.updatedAt - a.updatedAt;
+    });
+
+  // Render ungrouped sessions
+  if (ungroupedSessions.length > 0) {
+    if (sortedGroups.length > 0) {
+      const ungroupedSection = document.createElement("div");
+      ungroupedSection.className = "chat-ungrouped";
+
+      const label = document.createElement("div");
+      label.className = "chat-ungrouped-label";
+      label.textContent = "Ungrouped";
+      ungroupedSection.appendChild(label);
+
+      ungroupedSessions.forEach((session) => {
+        const item = createChatItem(session);
+        ungroupedSection.appendChild(item);
+      });
+
+      chatList.appendChild(ungroupedSection);
+    } else {
+      // No groups, just render sessions directly
+      ungroupedSessions.forEach((session) => {
+        const item = createChatItem(session);
+        chatList.appendChild(item);
+      });
+    }
+  }
+}
+
+function createChatItem(session) {
+  const item = document.createElement("div");
+  item.className = `chat-item${session.id === state.activeSessionId ? " active" : ""}${session.parentSessionId ? " branched" : ""}${session.starred ? " starred" : ""}`;
+
+  // Star button
+  const starBtn = document.createElement("button");
+  starBtn.type = "button";
+  starBtn.className = `chat-star${session.starred ? " active" : ""}`;
+  starBtn.textContent = session.starred ? "★" : "☆";
+  starBtn.title = session.starred ? "Unstar" : "Star";
+  starBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleStarSession(session.id);
+  });
+  item.appendChild(starBtn);
+
+  // Add branch icon if this is a branched session
+  if (session.parentSessionId) {
+    const branchIcon = document.createElement("span");
+    branchIcon.className = "branch-icon";
+    branchIcon.textContent = "⑂";
+    branchIcon.title = "Branched conversation";
+    item.appendChild(branchIcon);
+  }
+
+  const titleSpan = document.createElement("span");
+  titleSpan.className = "chat-item-title";
+  titleSpan.textContent = session.title || "New chat";
+  item.appendChild(titleSpan);
+
+  // Add generating indicator if this session is generating a response
+  if (state.generatingSessionId === session.id) {
+    const generatingIndicator = document.createElement("span");
+    generatingIndicator.className = "chat-item-generating";
+    generatingIndicator.title = "Generating response...";
+    item.appendChild(generatingIndicator);
+  }
+
+  // Add unread indicator if this session has unread messages
+  if (session.unread && session.id !== state.activeSessionId) {
+    const unreadBadge = document.createElement("span");
+    unreadBadge.className = "chat-item-unread";
+    unreadBadge.title = "Unread message";
+    item.appendChild(unreadBadge);
+  }
+
+  item.addEventListener("click", () => {
+    setActiveSession(session.id);
+  });
+  item.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    showChatContextMenu(event.clientX, event.clientY, session.id);
+  });
+  item.addEventListener("dblclick", () => {
+    renameSession(session.id);
+  });
+
+  return item;
 }
 
 function toggleStarSession(sessionId) {
@@ -2085,6 +2387,12 @@ function showChatContextMenu(x, y, sessionId) {
     const session = state.sessions.find((s) => s.id === sessionId);
     starChatBtn.textContent = session?.starred ? "Unstar chat" : "Star chat";
   }
+
+  // Show/hide "Remove from project" based on whether session is in a group
+  if (removeFromProjectBtn) {
+    const group = getSessionGroup(sessionId);
+    removeFromProjectBtn.hidden = !group;
+  }
 }
 
 function hideChatContextMenu() {
@@ -2095,6 +2403,220 @@ function hideChatContextMenu() {
   state.contextSessionId = null;
 }
 
+function showGroupContextMenu(x, y, groupId) {
+  if (!groupContextMenu) {
+    return;
+  }
+  state.contextGroupId = groupId;
+  groupContextMenu.style.left = `${x}px`;
+  groupContextMenu.style.top = `${y}px`;
+  groupContextMenu.hidden = false;
+}
+
+function hideGroupContextMenu() {
+  if (!groupContextMenu) {
+    return;
+  }
+  groupContextMenu.hidden = true;
+  state.contextGroupId = null;
+}
+
+function hideAllContextMenus() {
+  hideChatContextMenu();
+  hideGroupContextMenu();
+}
+
+function openMoveToProjectModal(sessionId) {
+  if (!moveToProjectModal || !projectList) return;
+
+  if (!sessionId) {
+    setStatus('Error: No session selected');
+    return;
+  }
+
+  const session = state.sessions.find(s => s.id === sessionId);
+  if (!session) {
+    setStatus('Error: Session not found');
+    return;
+  }
+
+  state.contextSessionId = sessionId;
+  renderProjectList();
+  moveToProjectModal.hidden = false;
+}
+
+function closeMoveToProjectModal() {
+  if (!moveToProjectModal) return;
+  moveToProjectModal.hidden = true;
+}
+
+function renderProjectList() {
+  if (!projectList) return;
+
+  const currentGroup = getSessionGroup(state.contextSessionId);
+
+  if (state.groups.length === 0) {
+    projectList.innerHTML = '<div class="project-list-empty">No projects yet. Create one to organize your chats.</div>';
+    return;
+  }
+
+  projectList.innerHTML = "";
+
+  // Sort groups by update time
+  const sortedGroups = [...state.groups].sort((a, b) => b.updatedAt - a.updatedAt);
+
+  sortedGroups.forEach((group) => {
+    const item = document.createElement("div");
+    const isActive = currentGroup?.id === group.id;
+    item.className = `project-list-item${isActive ? " active" : ""}`;
+
+    const icon = document.createElement("span");
+    icon.className = "project-icon";
+    icon.textContent = "📁";
+
+    const name = document.createElement("span");
+    name.className = "project-name";
+    name.textContent = group.name;
+
+    item.appendChild(icon);
+    item.appendChild(name);
+
+    // Add checkmark if already in this project
+    if (isActive) {
+      const check = document.createElement("span");
+      check.textContent = "✓";
+      check.style.color = "var(--accent)";
+      check.style.fontWeight = "bold";
+      item.appendChild(check);
+    }
+
+    item.addEventListener("click", () => {
+      if (currentGroup?.id === group.id) {
+        // Already in this group, just close the modal
+        closeMoveToProjectModal();
+        return;
+      }
+
+      // Move to this group
+      addSessionToGroup(state.contextSessionId, group.id);
+      setStatus(`Moved to "${group.name}".`);
+      closeMoveToProjectModal();
+    });
+
+    projectList.appendChild(item);
+  });
+
+  // Add "Remove from project" option if session is in a group
+  if (currentGroup) {
+    const removeItem = document.createElement("div");
+    removeItem.className = "project-list-item";
+    removeItem.style.borderColor = "#ef4444";
+    removeItem.style.color = "#ef4444";
+
+    const icon = document.createElement("span");
+    icon.className = "project-icon";
+    icon.textContent = "✕";
+
+    const name = document.createElement("span");
+    name.className = "project-name";
+    name.textContent = "Remove from project";
+
+    removeItem.appendChild(icon);
+    removeItem.appendChild(name);
+
+    removeItem.addEventListener("click", () => {
+      removeSessionFromGroup(state.contextSessionId, currentGroup.id);
+      closeMoveToProjectModal();
+      setStatus("Removed from project.");
+    });
+
+    projectList.appendChild(removeItem);
+  }
+}
+
+function createNewProject() {
+  const name = window.prompt("Project name", "New Project");
+  if (name === null) return null;
+
+  const trimmed = name.trim();
+  if (!trimmed) {
+    setStatus("Project name cannot be empty.");
+    return null;
+  }
+
+  const group = createGroup(trimmed);
+  state.groups.push(group);
+  saveSessions();
+  renderChatList();
+  setStatus(`Project "${trimmed}" created.`);
+  return group;
+}
+
+// Sidebar resizing
+function setSidebarWidth(width) {
+  const minWidth = 200;
+  const maxWidth = 600;
+  const clampedWidth = Math.max(minWidth, Math.min(maxWidth, width));
+  document.documentElement.style.setProperty('--sidebar-width', `${clampedWidth}px`);
+  localStorage.setItem(SIDEBAR_WIDTH_KEY, clampedWidth);
+  return clampedWidth;
+}
+
+function loadSidebarWidth() {
+  const saved = localStorage.getItem(SIDEBAR_WIDTH_KEY);
+  if (saved) {
+    const width = parseInt(saved, 10);
+    if (!isNaN(width)) {
+      document.documentElement.style.setProperty('--sidebar-width', `${width}px`);
+    }
+  } else {
+    // Set default width
+    document.documentElement.style.setProperty('--sidebar-width', '280px');
+  }
+}
+
+function initSidebarResize() {
+  if (!sidebarResizer) {
+    return;
+  }
+
+  let isResizing = false;
+  let startX = 0;
+  let startWidth = 0;
+
+  sidebarResizer.addEventListener('mousedown', (e) => {
+    isResizing = true;
+    startX = e.clientX;
+
+    // Get current sidebar width from CSS variable
+    let currentWidth = getComputedStyle(document.documentElement)
+      .getPropertyValue('--sidebar-width')
+      .trim()
+      .replace('px', '');
+    startWidth = parseInt(currentWidth) || 280;
+
+    sidebarResizer.classList.add('resizing');
+    document.body.classList.add('resizing-sidebar');
+    e.preventDefault();
+    e.stopPropagation();
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!isResizing) return;
+
+    const delta = e.clientX - startX;
+    const newWidth = startWidth + delta;
+    setSidebarWidth(newWidth);
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (isResizing) {
+      isResizing = false;
+      sidebarResizer.classList.remove('resizing');
+      document.body.classList.remove('resizing-sidebar');
+    }
+  });
+}
 
 function renameSession(sessionId) {
   if (state.sending) {
@@ -2207,13 +2729,25 @@ function branchFromMessage(index) {
 
   // Add to sessions and switch to it
   state.sessions.unshift(newSession);
+
+  // If parent session is in a project, add the branched session to the same project
+  const parentGroup = getSessionGroup(state.activeSessionId);
+  if (parentGroup) {
+    parentGroup.sessionIds.push(newSession.id);
+    parentGroup.updatedAt = Date.now();
+  }
+
   saveSessions();
 
   setActiveSession(newSession.id);
   renderChatList();
   renderChatMessages();
 
-  setStatus(`Created branch from message ${index + 1}. You can continue the conversation from here.`);
+  if (parentGroup) {
+    setStatus(`Created branch from message ${index + 1} in project "${parentGroup.name}".`);
+  } else {
+    setStatus(`Created branch from message ${index + 1}. You can continue the conversation from here.`);
+  }
 }
 
 async function sendAssistantResponse() {
@@ -2258,8 +2792,17 @@ async function sendAssistantResponse() {
   addNote("queued", "Queued");
   setStatus("Thinking...");
   state.sending = true;
+  state.generatingSessionId = state.activeSessionId;
+  state.pendingMessage = {
+    assistantText: "",
+    refusalText: "",
+    thinkingText: "",
+    pending: pending,
+    thinkingPanel: thinkingPanel,
+  };
   updateControls();
   updateActionButtons();
+  renderChatList();
   startTimer();
 
   const payload = {
@@ -2358,50 +2901,79 @@ async function sendAssistantResponse() {
             addNote("progress", "Working");
             break;
           case "response.reasoning_text.delta":
-            if (thinkingPanel && event.delta) {
-              thinkingPanel.details.open = true;
-              thinkingPanel.summaryText.textContent += event.delta;
+            if (state.pendingMessage && event.delta) {
+              state.pendingMessage.thinkingText += event.delta;
+              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.thinkingPanel) {
+                state.pendingMessage.thinkingPanel.details.open = true;
+                state.pendingMessage.thinkingPanel.summaryText.textContent += event.delta;
+              }
             }
             break;
           case "response.reasoning_summary_text.delta":
-            if (thinkingPanel && event.delta) {
-              thinkingPanel.details.open = true;
-              // Clear reasoning text and show summary instead
-              if (!thinkingPanel.showingSummary) {
-                thinkingPanel.summaryText.textContent = "";
-                thinkingPanel.showingSummary = true;
+            if (state.pendingMessage && event.delta) {
+              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.thinkingPanel) {
+                state.pendingMessage.thinkingPanel.details.open = true;
+                // Clear reasoning text and show summary instead
+                if (!state.pendingMessage.thinkingPanel.showingSummary) {
+                  state.pendingMessage.thinkingPanel.summaryText.textContent = "";
+                  state.pendingMessage.thinkingPanel.showingSummary = true;
+                }
+                state.pendingMessage.thinkingPanel.summaryText.textContent += event.delta;
               }
-              thinkingPanel.summaryText.textContent += event.delta;
             }
             break;
           case "response.reasoning_summary_part.added":
           case "response.reasoning_summary_part.delta":
-            if (thinkingPanel && event.part?.text) {
-              thinkingPanel.details.open = true;
-              thinkingPanel.summaryText.textContent += event.part.text;
+            if (state.pendingMessage && event.part?.text) {
+              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.thinkingPanel) {
+                state.pendingMessage.thinkingPanel.details.open = true;
+                state.pendingMessage.thinkingPanel.summaryText.textContent += event.part.text;
+              }
             }
             break;
           case "response.output_text.delta":
             addNote("draft", "Drafting response");
             assistantText += event.delta || "";
-            pending.text.textContent = assistantText;
-            setStatus("Streaming response...");
+            // Update the stored pending message state
+            if (state.pendingMessage) {
+              state.pendingMessage.assistantText = assistantText;
+              // Update UI if we're viewing the generating session
+              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
+                state.pendingMessage.pending.text.textContent = assistantText;
+                setStatus("Streaming response...");
+              }
+            }
             break;
           case "response.output_text.done":
             if (!assistantText && event.text) {
               assistantText = event.text;
-              pending.text.textContent = assistantText;
+              if (state.pendingMessage) {
+                state.pendingMessage.assistantText = assistantText;
+                if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
+                  state.pendingMessage.pending.text.textContent = assistantText;
+                }
+              }
             }
             break;
           case "response.refusal.delta":
             refusalText += event.delta || "";
-            pending.text.textContent = refusalText;
-            setStatus("Refusal in progress...");
+            if (state.pendingMessage) {
+              state.pendingMessage.refusalText = refusalText;
+              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
+                state.pendingMessage.pending.text.textContent = refusalText;
+                setStatus("Refusal in progress...");
+              }
+            }
             break;
           case "response.refusal.done":
             if (event.refusal) {
               refusalText = event.refusal;
-              pending.text.textContent = refusalText;
+              if (state.pendingMessage) {
+                state.pendingMessage.refusalText = refusalText;
+                if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
+                  state.pendingMessage.pending.text.textContent = refusalText;
+                }
+              }
             }
             break;
           case "response.completed":
@@ -2479,50 +3051,73 @@ async function sendAssistantResponse() {
       throw new Error("No text output received.");
     }
 
-    pending.msg.classList.remove("pending");
-    renderMarkdownInto(pending.text, assistantText);
+    // Find the session where the message was originally sent
+    const generatingSession = state.sessions.find((item) => item.id === state.generatingSessionId);
 
-    maybeCollapseThinking();
+    if (generatingSession) {
+      // Add the assistant response to the generating session
+      generatingSession.messages.push({
+        role: "assistant",
+        content: [{ type: "output_text", text: assistantText }],
+        usageTokens: usageTotal || 0,
+      });
+      generatingSession.usageTokens = (generatingSession.usageTokens || 0) + (usageTotal || 0);
+      updateSessionMetadata(generatingSession);
 
-    state.messages.push({
-      role: "assistant",
-      content: [{ type: "output_text", text: assistantText }],
-      usageTokens: usageTotal || 0,
-    });
+      // Mark as unread if user switched to a different session
+      if (state.activeSessionId !== state.generatingSessionId) {
+        generatingSession.unread = true;
+      }
 
-    const session = state.sessions.find((item) => item.id === state.activeSessionId);
-    if (session) {
-      session.messages = state.messages;
-      session.usageTokens = (session.usageTokens || 0) + (usageTotal || 0);
-      updateSessionMetadata(session);
+      // Update state.messages if we're still viewing the same session
+      if (state.activeSessionId === state.generatingSessionId) {
+        state.messages = generatingSession.messages;
+      }
+
       saveSessions();
       renderChatList();
     }
     updateTokenPill();
 
-    if (pending.actions) {
-      pending.actions.remove();
-    }
-    const assistantIndex = state.messages.length - 1;
-    const actions = createActions({
-      text: assistantText,
-      messageIndex: assistantIndex,
-      role: "assistant",
-    });
-    pending.msg.querySelector(".bubble")?.appendChild(actions);
-    updateActionButtons();
+    // Only update the DOM if we're still viewing the generating session
+    if (state.activeSessionId === state.generatingSessionId && state.pendingMessage && state.pendingMessage.pending) {
+      state.pendingMessage.pending.msg.classList.remove("pending");
+      renderMarkdownInto(state.pendingMessage.pending.text, assistantText);
 
-    setStatus("Ready");
+      maybeCollapseThinking();
+
+      if (state.pendingMessage.pending.actions) {
+        state.pendingMessage.pending.actions.remove();
+      }
+      const assistantIndex = state.messages.length - 1;
+      const actions = createActions({
+        text: assistantText,
+        messageIndex: assistantIndex,
+        role: "assistant",
+      });
+      state.pendingMessage.pending.msg.querySelector(".bubble")?.appendChild(actions);
+      updateActionButtons();
+      setStatus("Ready");
+    } else {
+      // User switched to a different session, show notification
+      setStatus(`Response completed in "${generatingSession?.title || 'chat'}".`);
+    }
   } catch (error) {
-    pending.msg.classList.remove("pending");
-    pending.msg.classList.add("error");
-    pending.text.textContent = `Error: ${error.message}`;
-    addNote("error", "Failed");
+    // Only update DOM if we're still viewing the generating session
+    if (state.activeSessionId === state.generatingSessionId && state.pendingMessage && state.pendingMessage.pending) {
+      state.pendingMessage.pending.msg.classList.remove("pending");
+      state.pendingMessage.pending.msg.classList.add("error");
+      state.pendingMessage.pending.text.textContent = `Error: ${error.message}`;
+      addNote("error", "Failed");
+    }
     setStatus("Something went wrong. Check your API key and model.");
   } finally {
     state.sending = false;
+    state.generatingSessionId = null;
+    state.pendingMessage = null;
     updateControls();
     updateActionButtons();
+    renderChatList();
     stopTimer();
     messageInput.focus();
   }
@@ -2721,6 +3316,9 @@ async function initialize() {
   themeSelect.value = savedTheme;
   applyTheme(savedTheme);
 
+  // Load groups from localStorage
+  state.groups = loadGroups();
+
   let loadedFromFile = false;
 
   // Try to restore linked storage first (highest priority)
@@ -2729,6 +3327,7 @@ async function initialize() {
     const linkedPayload = await loadFromLinkedStorage();
     if (linkedPayload) {
       state.sessions = linkedPayload.sessions;
+      state.groups = linkedPayload.groups || [];
       if (state.sessions.length === 0) {
         const session = createSession();
         state.sessions.push(session);
@@ -2750,6 +3349,7 @@ async function initialize() {
     const filePayload = await loadSessionsFromOpfs({ silent: true });
     if (filePayload) {
       state.sessions = filePayload.sessions;
+      state.groups = filePayload.groups || [];
       if (state.sessions.length === 0) {
         const session = createSession();
         state.sessions.push(session);
@@ -2795,6 +3395,12 @@ async function initialize() {
   renderAttachmentList();
   updateControls();
   updateModelPill();
+
+  // Load sidebar width preference
+  loadSidebarWidth();
+
+  // Initialize sidebar resize functionality
+  initSidebarResize();
 }
 
 sendBtn.addEventListener("click", sendMessage);
@@ -2806,9 +3412,6 @@ messageInput.addEventListener("keydown", (event) => {
 });
 
 newChatBtn.addEventListener("click", () => {
-  if (state.sending) {
-    return;
-  }
   const session = createSession();
   state.sessions.unshift(session);
   setActiveSession(session.id);
@@ -2859,9 +3462,14 @@ document.addEventListener("click", (event) => {
       hideChatContextMenu();
     }
   }
+  if (groupContextMenu && !groupContextMenu.hidden) {
+    if (!groupContextMenu.contains(event.target)) {
+      hideGroupContextMenu();
+    }
+  }
 });
 
-window.addEventListener("resize", hideChatContextMenu);
+window.addEventListener("resize", hideAllContextMenus);
 
 if (renameChatBtn) {
   renameChatBtn.addEventListener("click", () => {
@@ -2886,6 +3494,82 @@ if (deleteChatBtn) {
     if (state.contextSessionId) {
       deleteSession(state.contextSessionId);
       hideChatContextMenu();
+    }
+  });
+}
+
+// New Project button
+if (newProjectBtn) {
+  newProjectBtn.addEventListener("click", () => {
+    createNewProject();
+  });
+}
+
+// Move to project button in chat context menu
+if (moveToProjectBtn) {
+  moveToProjectBtn.addEventListener("click", () => {
+    if (state.contextSessionId) {
+      const sessionId = state.contextSessionId;
+      hideChatContextMenu();
+      openMoveToProjectModal(sessionId);
+    }
+  });
+}
+
+// Remove from project button in chat context menu
+if (removeFromProjectBtn) {
+  removeFromProjectBtn.addEventListener("click", () => {
+    if (state.contextSessionId) {
+      const sessionId = state.contextSessionId;
+      const group = getSessionGroup(sessionId);
+      if (group) {
+        removeSessionFromGroup(sessionId, group.id);
+        setStatus("Removed from project.");
+      }
+      hideChatContextMenu();
+    }
+  });
+}
+
+// Group context menu buttons
+if (renameGroupBtn) {
+  renameGroupBtn.addEventListener("click", () => {
+    if (state.contextGroupId) {
+      renameGroup(state.contextGroupId);
+      hideGroupContextMenu();
+    }
+  });
+}
+
+if (deleteGroupBtn) {
+  deleteGroupBtn.addEventListener("click", () => {
+    if (state.contextGroupId) {
+      const group = state.groups.find(g => g.id === state.contextGroupId);
+      if (group && confirm(`Delete project "${group.name}"? The chats inside will not be deleted.`)) {
+        deleteGroup(state.contextGroupId);
+        setStatus("Project deleted.");
+      }
+      hideGroupContextMenu();
+    }
+  });
+}
+
+// Move to project modal
+if (closeMoveModalBtn) {
+  closeMoveModalBtn.addEventListener("click", closeMoveToProjectModal);
+}
+
+if (moveToProjectModal) {
+  moveToProjectModal.querySelector(".modal-backdrop")?.addEventListener("click", closeMoveToProjectModal);
+}
+
+if (createProjectFromMoveBtn) {
+  createProjectFromMoveBtn.addEventListener("click", () => {
+    const group = createNewProject();
+    if (group && state.contextSessionId) {
+      addSessionToGroup(state.contextSessionId, group.id);
+      closeMoveToProjectModal();
+      setStatus(`Moved to "${group.name}".`);
     }
   });
 }

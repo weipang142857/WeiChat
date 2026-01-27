@@ -21,7 +21,10 @@
       <aside class="sidebar">
         <div class="sidebar-header">
           <div class="logo">WeiChat</div>
-          <button id="newChatBtn" class="ghost">New chat</button>
+          <div class="sidebar-header-buttons">
+            <button id="newProjectBtn" class="ghost small" title="Create new project">📁 Project</button>
+            <button id="newChatBtn" class="ghost">New chat</button>
+          </div>
         </div>
 
         <div class="sidebar-section chats">
@@ -78,6 +81,8 @@
           </div>
         </details>
       </aside>
+
+      <div id="sidebarResizer" class="sidebar-resizer"></div>
 
       <div class="main">
         <header class="topbar">
@@ -181,7 +186,28 @@
     <div id="chatContextMenu" class="context-menu" hidden>
       <button id="starChatBtn" type="button">Star chat</button>
       <button id="renameChatBtn" type="button">Rename chat</button>
+      <button id="moveToProjectBtn" type="button">Move to project...</button>
+      <button id="removeFromProjectBtn" type="button" hidden>Remove from project</button>
       <button id="deleteChatBtn" class="danger" type="button">Delete chat</button>
+    </div>
+
+    <div id="groupContextMenu" class="context-menu" hidden>
+      <button id="renameGroupBtn" type="button">Rename project</button>
+      <button id="deleteGroupBtn" class="danger" type="button">Delete project</button>
+    </div>
+
+    <div id="moveToProjectModal" class="modal" hidden>
+      <div class="modal-backdrop"></div>
+      <div class="modal-content" style="max-width: 400px;">
+        <div class="modal-header">
+          <h3>Move to Project</h3>
+          <button type="button" id="closeMoveModalBtn" class="modal-close">&times;</button>
+        </div>
+        <div class="modal-body">
+          <div id="projectList" class="project-list"></div>
+          <button type="button" id="createProjectFromMoveBtn" class="ghost" style="width: 100%; margin-top: 12px;">+ Create new project</button>
+        </div>
+      </div>
     </div>
 
     <div id="fileManagerModal" class="modal" hidden>
