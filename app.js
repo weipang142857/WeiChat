@@ -739,7 +739,10 @@ function renderMarkdownInto(el, text) {
       const i = Number(index);
       return Number.isFinite(i) ? mathStash[i] : match;
     });
-    const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(restored) : restored;
+    const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(restored, {
+      ADD_ATTR: ['data-file-id', 'data-filename'],
+      ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|downloadfile):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+    }) : restored;
     el.innerHTML = safeHtml;
 
     // Handle file download links
@@ -747,10 +750,11 @@ function renderMarkdownInto(el, text) {
       link.addEventListener('click', async (e) => {
         e.preventDefault();
         const href = link.getAttribute('href');
-        const match = href.match(/^downloadfile:\/\/([^\/]+)\/(.+)$/);
+        // Format: downloadfile://{containerId}/{fileId}/{filename}
+        const match = href.match(/^downloadfile:\/\/([^\/]+)\/([^\/]+)\/(.+)$/);
         if (match) {
-          const [, fileId, filename] = match;
-          await downloadFileFromAPI(fileId, filename);
+          const [, containerId, fileId, filename] = match;
+          await downloadFileFromAPI(containerId, fileId, filename);
         }
       });
     });
@@ -1131,22 +1135,30 @@ function extractAssistantText(content) {
     return "";
   }
 
-  const text = content
+  let text = content
     .map((part) => {
       if (part.type === "output_text" && typeof part.text === "string") {
-        return part.text;
+        let textContent = part.text;
+
+        // Process file citations from annotations
+        if (Array.isArray(part.annotations)) {
+          for (const annotation of part.annotations) {
+            if (annotation.type === "container_file_citation" && annotation.file_id && annotation.filename) {
+              // Replace sandbox URLs with downloadable links
+              const sandboxPattern = new RegExp(`\\[([^\\]]+)\\]\\(sandbox:[^)]+\\)`, 'g');
+              const containerId = annotation.container_id || "";
+              textContent = textContent.replace(sandboxPattern, `[📎 Download ${annotation.filename}](downloadfile://${containerId}/${annotation.file_id}/${annotation.filename})`);
+            }
+          }
+        }
+
+        return textContent;
       }
       if (part.type === "refusal" && typeof part.refusal === "string") {
         return part.refusal;
       }
       if (part.type === "input_text" && typeof part.text === "string") {
         return part.text;
-      }
-      // Handle file outputs from code interpreter
-      if (part.type === "output_file" && part.file_id) {
-        const filename = part.filename || "file";
-        const fileId = part.file_id;
-        return `\n\n[📎 Download ${filename}](downloadfile://${fileId}/${filename})\n\n`;
       }
       return "";
     })
@@ -2995,10 +3007,72 @@ async function sendAssistantResponse() {
               }
             }
             break;
+          case "response.output_item.done":
+            // Check if this is a message with file citations in annotations
+            if (event.item && event.item.type === "message" && Array.isArray(event.item.content)) {
+              for (const content of event.item.content) {
+                if (content.type === "output_text" && content.text) {
+                  // Check for file citations in annotations
+                  if (Array.isArray(content.annotations)) {
+                    for (const annotation of content.annotations) {
+                      if (annotation.type === "container_file_citation" && annotation.file_id && annotation.filename) {
+                        console.log("Found file citation:", annotation);
+                        // Replace sandbox URLs with downloadable links
+                        const sandboxPattern = new RegExp(`\\[([^\\]]+)\\]\\(sandbox:[^)]+\\)`, 'g');
+                        const containerId = annotation.container_id || "";
+                        const newText = content.text.replace(sandboxPattern, `[📎 Download ${annotation.filename}](downloadfile://${containerId}/${annotation.file_id}/${annotation.filename})`);
+
+                        if (newText !== content.text) {
+                          assistantText = assistantText.replace(content.text, newText);
+                          if (state.pendingMessage) {
+                            state.pendingMessage.assistantText = assistantText;
+                            if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
+                              state.pendingMessage.pending.text.textContent = assistantText;
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+            break;
           case "response.completed":
             addNote("done", "Complete");
-            if (event.response && event.response.usage) {
-              usageTotal = event.response.usage.total_tokens || 0;
+            if (event.response) {
+              // Process file citations from the final response
+              if (event.response.output) {
+                for (const item of event.response.output) {
+                  if (item.type === "message" && Array.isArray(item.content)) {
+                    for (const content of item.content) {
+                      if (content.type === "output_text" && content.text) {
+                        // Check for file citations in annotations
+                        if (Array.isArray(content.annotations)) {
+                          for (const annotation of content.annotations) {
+                            if (annotation.type === "container_file_citation" && annotation.file_id && annotation.filename) {
+                              // Replace sandbox URLs with downloadable links in the assistantText
+                              const sandboxPattern = new RegExp(`\\[([^\\]]+)\\]\\(sandbox:[^)]+\\)`, 'g');
+                              const containerId = annotation.container_id || "";
+                              assistantText = assistantText.replace(sandboxPattern, `[📎 Download ${annotation.filename}](downloadfile://${containerId}/${annotation.file_id}/${annotation.filename})`);
+
+                              if (state.pendingMessage) {
+                                state.pendingMessage.assistantText = assistantText;
+                                if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
+                                  state.pendingMessage.pending.text.textContent = assistantText;
+                                }
+                              }
+                            }
+                          }
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+              if (event.response.usage) {
+                usageTotal = event.response.usage.total_tokens || 0;
+              }
             }
             break;
           case "response.failed":
@@ -3022,6 +3096,20 @@ async function sendAssistantResponse() {
             break;
           case "response.code_interpreter_call.completed":
             addNote("code_done", "Code execution complete");
+            // Check if there are file outputs
+            if (event.output && Array.isArray(event.output)) {
+              event.output.forEach(output => {
+                if (output.type === "file" && output.file_id) {
+                  console.log("File output from code interpreter:", output);
+                  const filename = output.filename || "file";
+                  assistantText += `\n\n[📎 Download ${filename}](downloadfile://${output.file_id}/${filename})\n\n`;
+                  if (state.pendingMessage && state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
+                    state.pendingMessage.assistantText = assistantText;
+                    state.pendingMessage.pending.text.textContent = assistantText;
+                  }
+                }
+              });
+            }
             break;
           case "response.code_interpreter_call.code_delta":
             // Code being written
@@ -3030,6 +3118,7 @@ async function sendAssistantResponse() {
           case "response.code_interpreter_call.output":
             // Code output received
             setStatus("Code output received");
+            console.log("Code interpreter output event:", event);
             break;
           case "response.file_search_call.in_progress":
             addNote("file_search", "Searching files...");
@@ -3043,8 +3132,8 @@ async function sendAssistantResponse() {
             break;
           default:
             // Log unknown events for debugging
-            if (event.type && (event.type.includes("reasoning") || event.type.includes("tool") || event.type.includes("web_search") || event.type.includes("code_interpreter") || event.type.includes("file_search"))) {
-              console.log("Event:", event.type, event);
+            if (event.type && (event.type.includes("reasoning") || event.type.includes("tool") || event.type.includes("web_search") || event.type.includes("code_interpreter") || event.type.includes("file_search") || event.type.includes("output_file") || event.type.includes("file"))) {
+              console.log("Unhandled event:", event.type, event);
             }
             break;
         }
@@ -4042,7 +4131,7 @@ function downloadFile(content, filename, mimeType) {
   URL.revokeObjectURL(url);
 }
 
-async function downloadFileFromAPI(fileId, filename) {
+async function downloadFileFromAPI(containerId, fileId, filename) {
   const apiKey = apiKeyInput.value.trim();
   if (!apiKey) {
     setStatus("API key required to download files.");
@@ -4052,7 +4141,17 @@ async function downloadFileFromAPI(fileId, filename) {
   try {
     setStatus(`Downloading ${filename}...`);
 
-    const response = await fetch(`https://api.openai.com/v1/files/${fileId}/content`, {
+    // Use the correct endpoint based on whether this is a container file
+    let url;
+    if (containerId && fileId.startsWith('cfile_')) {
+      // Container file from code interpreter
+      url = `https://api.openai.com/v1/containers/${containerId}/files/${fileId}/content`;
+    } else {
+      // Regular file
+      url = `https://api.openai.com/v1/files/${fileId}/content`;
+    }
+
+    const response = await fetch(url, {
       method: "GET",
       headers: {
         Authorization: `Bearer ${apiKey}`,
@@ -4060,18 +4159,20 @@ async function downloadFileFromAPI(fileId, filename) {
     });
 
     if (!response.ok) {
-      throw new Error(`Failed to download file: ${response.statusText}`);
+      const errorText = await response.text();
+      console.error("Download failed:", response.status, errorText);
+      throw new Error(`Failed to download file: ${response.status} ${response.statusText}`);
     }
 
     const blob = await response.blob();
-    const url = URL.createObjectURL(blob);
+    const blobUrl = URL.createObjectURL(blob);
     const a = document.createElement("a");
-    a.href = url;
+    a.href = blobUrl;
     a.download = filename;
     document.body.appendChild(a);
     a.click();
     document.body.removeChild(a);
-    URL.revokeObjectURL(url);
+    URL.revokeObjectURL(blobUrl);
 
     setStatus(`Downloaded ${filename}`);
   } catch (error) {
