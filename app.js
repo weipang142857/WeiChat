@@ -741,6 +741,19 @@ function renderMarkdownInto(el, text) {
     });
     const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(restored) : restored;
     el.innerHTML = safeHtml;
+
+    // Handle file download links
+    el.querySelectorAll('a[href^="downloadfile://"]').forEach(link => {
+      link.addEventListener('click', async (e) => {
+        e.preventDefault();
+        const href = link.getAttribute('href');
+        const match = href.match(/^downloadfile:\/\/([^\/]+)\/(.+)$/);
+        if (match) {
+          const [, fileId, filename] = match;
+          await downloadFileFromAPI(fileId, filename);
+        }
+      });
+    });
   } else {
     el.textContent = normalized;
   }
@@ -1128,6 +1141,12 @@ function extractAssistantText(content) {
       }
       if (part.type === "input_text" && typeof part.text === "string") {
         return part.text;
+      }
+      // Handle file outputs from code interpreter
+      if (part.type === "output_file" && part.file_id) {
+        const filename = part.filename || "file";
+        const fileId = part.file_id;
+        return `\n\n[📎 Download ${filename}](downloadfile://${fileId}/${filename})\n\n`;
       }
       return "";
     })
@@ -4021,6 +4040,44 @@ function downloadFile(content, filename, mimeType) {
   a.click();
   document.body.removeChild(a);
   URL.revokeObjectURL(url);
+}
+
+async function downloadFileFromAPI(fileId, filename) {
+  const apiKey = apiKeyInput.value.trim();
+  if (!apiKey) {
+    setStatus("API key required to download files.");
+    return;
+  }
+
+  try {
+    setStatus(`Downloading ${filename}...`);
+
+    const response = await fetch(`https://api.openai.com/v1/files/${fileId}/content`, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+      },
+    });
+
+    if (!response.ok) {
+      throw new Error(`Failed to download file: ${response.statusText}`);
+    }
+
+    const blob = await response.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    setStatus(`Downloaded ${filename}`);
+  } catch (error) {
+    setStatus(`Failed to download file: ${error.message}`);
+    console.error("File download error:", error);
+  }
 }
 
 function getShareableLink() {
