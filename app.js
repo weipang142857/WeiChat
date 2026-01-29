@@ -67,6 +67,10 @@ const closeMoveModalBtn = document.getElementById("closeMoveModalBtn");
 const projectList = document.getElementById("projectList");
 const createProjectFromMoveBtn = document.getElementById("createProjectFromMoveBtn");
 const sidebarResizer = document.getElementById("sidebarResizer");
+const selectionPopup = document.getElementById("selectionPopup");
+const quoteAndAskBtn = document.getElementById("quoteAndAskBtn");
+const inlineChatContextMenu = document.getElementById("inlineChatContextMenu");
+const deleteInlineChatBtn = document.getElementById("deleteInlineChatBtn");
 
 const STORAGE_KEY = "keychat.apiKey";
 const MODEL_KEY = "keychat.model";
@@ -108,6 +112,9 @@ const state = {
   contextSessionId: null,
   contextGroupId: null,
   linkedDirHandle: null,
+  currentSelection: null, // Stores text selection info for inline chats
+  contextInlineChatMessageIndex: null,
+  contextInlineChatId: null,
 };
 
 let fileSavePromise = Promise.resolve();
@@ -722,6 +729,30 @@ function normalizeMath(text) {
 }
 
 
+function renderMarkdown(text) {
+  if (!text) return "";
+
+  const normalized = normalizeMath(text);
+
+  if (window.marked) {
+    const mathStash = [];
+    const masked = stashMathSegments(normalized, mathStash);
+    const html = window.marked.parse(masked, { breaks: false, gfm: true });
+    const restored = html.replace(/@@STASH(\d+)@@/g, (match, index) => {
+      const i = Number(index);
+      return Number.isFinite(i) ? mathStash[i] : match;
+    });
+    const safeHtml = window.DOMPurify ? window.DOMPurify.sanitize(restored, {
+      ADD_ATTR: ['data-file-id', 'data-filename'],
+      ALLOWED_URI_REGEXP: /^(?:(?:(?:f|ht)tps?|mailto|tel|callto|sms|cid|xmpp|downloadfile):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i
+    }) : restored;
+    return safeHtml;
+  } else {
+    const escaped = text.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    return escaped.replace(/\n/g, "<br>");
+  }
+}
+
 function renderMarkdownInto(el, text) {
   el.classList.add("markdown");
   if (!text) {
@@ -1026,6 +1057,9 @@ function updateActionButtons() {
 }
 
 function renderChatMessages() {
+  // Save scroll position to check if user was at bottom
+  const wasAtBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 100;
+
   chatLog.innerHTML = "";
 
   state.messages.forEach((msg, index) => {
@@ -1038,10 +1072,16 @@ function renderChatMessages() {
       });
     } else if (msg.role === "assistant") {
       const assistantText = extractAssistantText(msg.content);
-      addMessage("assistant", assistantText, {
+      const msgResult = addMessage("assistant", assistantText, {
         markdown: true,
         actions: { text: assistantText, messageIndex: index, role: "assistant" },
       });
+
+      // Render inline chats for this assistant message
+      if (msg.inlineChats && msgResult && msgResult.msg) {
+        console.log("Calling renderInlineChats for message", index, "with", msg.inlineChats.length, "chats");
+        renderInlineChats(msgResult.msg, msg.inlineChats, index);
+      }
     }
   });
 
@@ -1066,7 +1106,11 @@ function renderChatMessages() {
 
   updateActionButtons();
   updateTokenPill();
-  chatLog.scrollTop = chatLog.scrollHeight;
+
+  // Only auto-scroll if user was already at the bottom
+  if (wasAtBottom) {
+    chatLog.scrollTop = chatLog.scrollHeight;
+  }
 }
 
 function parseUserContent(content) {
@@ -1211,7 +1255,11 @@ function normalizeStoredSessions(sessions) {
     const messages = Array.isArray(session.messages) ? session.messages : [];
     const normalizedMessages = messages.map((msg) => {
       if (msg.role === "assistant") {
-        return { ...msg, content: normalizeAssistantContent(msg.content) };
+        return {
+          ...msg,
+          content: normalizeAssistantContent(msg.content),
+          inlineChats: normalizeInlineChats(msg.inlineChats)
+        };
       }
       if (msg.role === "user") {
         return { ...msg, content: normalizeUserContent(msg.content) };
@@ -1237,6 +1285,718 @@ function buildInputMessages() {
     }
     return msg;
   });
+}
+
+// ============================================================================
+// Inline Chat Functions
+// ============================================================================
+
+function normalizeInlineChats(inlineChats) {
+  if (!Array.isArray(inlineChats)) return [];
+
+  return inlineChats.map((chat) => ({
+    id: chat.id || generateUUID(),
+    quotedText: chat.quotedText || "",
+    quotedTextIndices: chat.quotedTextIndices || { start: 0, end: 0 },
+    messages: Array.isArray(chat.messages) ? chat.messages.map((msg) => {
+      if (msg.role === "assistant") {
+        return { role: "assistant", content: normalizeAssistantContent(msg.content) };
+      }
+      if (msg.role === "user") {
+        return { role: "user", content: normalizeUserContent(msg.content) };
+      }
+      return msg;
+    }) : [],
+    collapsed: typeof chat.collapsed === "boolean" ? chat.collapsed : false,
+    createdAt: chat.createdAt || Date.now(),
+    updatedAt: chat.updatedAt || Date.now(),
+  }));
+}
+
+function buildInlineChatInputMessages(messageIndex, inlineChatId) {
+  // Get main conversation up to and including the parent message
+  const mainMessages = state.messages.slice(0, messageIndex + 1);
+  const normalizedMain = mainMessages.map((msg) => {
+    if (msg.role === "assistant") {
+      return { role: "assistant", content: normalizeAssistantContent(msg.content) };
+    }
+    if (msg.role === "user") {
+      return { role: "user", content: normalizeUserContent(msg.content) };
+    }
+    return msg;
+  });
+
+  // Find the inline chat and append its history
+  const parentMessage = state.messages[messageIndex];
+  if (parentMessage && parentMessage.inlineChats) {
+    const inlineChat = parentMessage.inlineChats.find((chat) => chat.id === inlineChatId);
+    if (inlineChat && Array.isArray(inlineChat.messages)) {
+      return [...normalizedMain, ...inlineChat.messages];
+    }
+  }
+
+  return normalizedMain;
+}
+
+function showSelectionPopup(x, y) {
+  console.log("showSelectionPopup called", x, y, selectionPopup);
+  if (!selectionPopup) return;
+
+  selectionPopup.removeAttribute('hidden');
+  selectionPopup.style.left = `${x}px`;
+  selectionPopup.style.top = `${y}px`;
+  selectionPopup.style.display = 'block';
+  console.log("Popup should be visible now");
+}
+
+function hideSelectionPopup() {
+  console.log("hideSelectionPopup called", new Error().stack);
+  if (selectionPopup) {
+    selectionPopup.setAttribute('hidden', '');
+    selectionPopup.style.display = 'none';
+  }
+  state.currentSelection = null;
+}
+
+function showInlineChatContextMenu(x, y, messageIndex, inlineChatId) {
+  if (!inlineChatContextMenu) return;
+
+  state.contextInlineChatMessageIndex = messageIndex;
+  state.contextInlineChatId = inlineChatId;
+
+  inlineChatContextMenu.hidden = false;
+  inlineChatContextMenu.style.left = `${x}px`;
+  inlineChatContextMenu.style.top = `${y}px`;
+}
+
+function hideInlineChatContextMenu() {
+  if (inlineChatContextMenu) {
+    inlineChatContextMenu.hidden = true;
+  }
+  state.contextInlineChatMessageIndex = null;
+  state.contextInlineChatId = null;
+}
+
+function createInlineChat(messageIndex, quotedText, quotedIndices) {
+  console.log("createInlineChat called", messageIndex, quotedText, quotedIndices);
+  const message = state.messages[messageIndex];
+  console.log("Message:", message);
+
+  if (!message || message.role !== "assistant") {
+    console.log("Invalid message or not assistant");
+    return;
+  }
+
+  // Initialize inlineChats array if needed
+  if (!Array.isArray(message.inlineChats)) {
+    message.inlineChats = [];
+    console.log("Initialized inlineChats array");
+  }
+
+  // Enforce limit of 5 inline chats per message
+  if (message.inlineChats.length >= 5) {
+    alert("Maximum of 5 inline chats per message reached.");
+    return;
+  }
+
+  // Truncate long quotes
+  const maxQuoteLength = 500;
+  let displayQuote = quotedText;
+  if (quotedText.length > maxQuoteLength) {
+    displayQuote = quotedText.substring(0, maxQuoteLength) + "...";
+  }
+
+  // Create new inline chat
+  const inlineChat = {
+    id: generateUUID(),
+    quotedText: displayQuote,
+    quotedTextIndices: quotedIndices,
+    messages: [],
+    collapsed: false,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  console.log("Created inline chat:", inlineChat);
+  message.inlineChats.push(inlineChat);
+  console.log("Message now has", message.inlineChats.length, "inline chats");
+
+  saveSessions();
+  renderChatMessages();
+
+  // Focus the new inline chat input
+  setTimeout(() => {
+    const inlineChatEl = document.querySelector(`[data-inline-chat-id="${inlineChat.id}"]`);
+    console.log("Looking for inline chat element:", inlineChatEl);
+    if (inlineChatEl) {
+      const input = inlineChatEl.querySelector(".inline-chat-input");
+      if (input) {
+        input.focus();
+        inlineChatEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    } else {
+      console.log("Inline chat element not found in DOM!");
+    }
+  }, 100);
+}
+
+function toggleInlineChat(messageIndex, inlineChatId) {
+  const message = state.messages[messageIndex];
+  if (!message || !message.inlineChats) return;
+
+  const inlineChat = message.inlineChats.find((chat) => chat.id === inlineChatId);
+  if (!inlineChat) return;
+
+  // Toggle the collapsed state
+  inlineChat.collapsed = !inlineChat.collapsed;
+
+  // Update the DOM directly to avoid scroll jumping
+  const inlineChatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
+  if (inlineChatEl) {
+    if (inlineChat.collapsed) {
+      inlineChatEl.classList.add('collapsed');
+    } else {
+      inlineChatEl.classList.remove('collapsed');
+    }
+
+    // Update the button text
+    const collapseBtn = inlineChatEl.querySelector('.inline-chat-collapse-btn:last-child');
+    if (collapseBtn) {
+      collapseBtn.textContent = inlineChat.collapsed ? "+" : "−";
+      collapseBtn.title = inlineChat.collapsed ? "Expand" : "Collapse";
+    }
+  }
+
+  saveSessions();
+}
+
+function deleteInlineChat(messageIndex, inlineChatId) {
+  const message = state.messages[messageIndex];
+  if (!message || !message.inlineChats) return;
+
+  const index = message.inlineChats.findIndex((chat) => chat.id === inlineChatId);
+  if (index !== -1) {
+    // Remove from data
+    message.inlineChats.splice(index, 1);
+
+    // Remove from DOM directly to avoid scroll jumping
+    const inlineChatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
+    if (inlineChatEl) {
+      inlineChatEl.style.opacity = '0';
+      inlineChatEl.style.transform = 'translateY(-10px)';
+      inlineChatEl.style.transition = 'all 0.2s ease-out';
+      setTimeout(() => {
+        inlineChatEl.remove();
+      }, 200);
+    }
+
+    saveSessions();
+  }
+}
+
+function generateUUID() {
+  return 'xxxxxxxx-xxxx-4xxx-4xxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
+    const r = Math.random() * 16 | 0;
+    const v = c === 'x' ? r : (r & 0x3 | 0x8);
+    return v.toString(16);
+  });
+}
+
+function createInlineChatInput(messageIndex, inlineChatId) {
+  const wrapper = document.createElement("div");
+  wrapper.className = "inline-chat-input-wrapper";
+
+  const textarea = document.createElement("textarea");
+  textarea.className = "inline-chat-input";
+  textarea.placeholder = "Ask a follow-up question...";
+  textarea.rows = 2;
+
+  const sendBtn = document.createElement("button");
+  sendBtn.className = "inline-chat-send-btn";
+  sendBtn.textContent = "Send";
+
+  const handleSend = async () => {
+    console.log("handleSend called");
+    const text = textarea.value.trim();
+    console.log("Text to send:", text);
+
+    if (!text) {
+      console.log("No text, returning");
+      return;
+    }
+
+    if (state.sending) {
+      console.log("Already sending, returning");
+      return;
+    }
+
+    console.log("Disabling input and calling sendInlineChatMessage");
+    textarea.disabled = true;
+    sendBtn.disabled = true;
+
+    try {
+      await sendInlineChatMessage(messageIndex, inlineChatId, text);
+      textarea.value = "";
+      console.log("Message sent successfully");
+    } catch (error) {
+      console.error("Inline chat error:", error);
+      alert("Failed to send inline chat message: " + error.message);
+    } finally {
+      textarea.disabled = false;
+      sendBtn.disabled = false;
+      textarea.focus();
+    }
+  };
+
+  sendBtn.addEventListener("click", handleSend);
+
+  textarea.addEventListener("keydown", (event) => {
+    if (event.key === "Enter" && !event.shiftKey) {
+      event.preventDefault();
+      handleSend();
+    }
+  });
+
+  wrapper.appendChild(textarea);
+  wrapper.appendChild(sendBtn);
+
+  return wrapper;
+}
+
+function createInlineChatElement(inlineChat, messageIndex) {
+  const container = document.createElement("div");
+  container.className = "inline-chat" + (inlineChat.collapsed ? " collapsed" : "");
+  container.dataset.inlineChatId = inlineChat.id;
+
+  // Header
+  const header = document.createElement("div");
+  header.className = "inline-chat-header";
+
+  const quote = document.createElement("div");
+  quote.className = "inline-chat-quote";
+
+  const quoteIcon = document.createElement("span");
+  quoteIcon.className = "quote-icon";
+  quoteIcon.textContent = "💬";
+
+  // Add message count badge if there are messages
+  const badge = document.createElement("span");
+  badge.className = "inline-chat-badge";
+  badge.textContent = Math.floor(inlineChat.messages.length / 2); // Divide by 2 since we have user+assistant pairs
+  if (inlineChat.messages.length > 0) {
+    badge.style.display = "inline-flex";
+  } else {
+    badge.style.display = "none";
+  }
+
+  const quoteText = document.createElement("div");
+  quoteText.className = "quote-text";
+  quoteText.textContent = inlineChat.quotedText;
+
+  quote.appendChild(quoteIcon);
+  quote.appendChild(badge);
+  quote.appendChild(quoteText);
+
+  const controls = document.createElement("div");
+  controls.className = "inline-chat-controls";
+
+  const collapseBtn = document.createElement("button");
+  collapseBtn.className = "inline-chat-collapse-btn";
+  collapseBtn.textContent = inlineChat.collapsed ? "+" : "−";
+  collapseBtn.title = inlineChat.collapsed ? "Expand" : "Collapse";
+  collapseBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    toggleInlineChat(messageIndex, inlineChat.id);
+  });
+
+  controls.appendChild(collapseBtn);
+  header.appendChild(quote);
+  header.appendChild(controls);
+
+  // Body
+  const body = document.createElement("div");
+  body.className = "inline-chat-body";
+
+  // Messages
+  const messagesContainer = document.createElement("div");
+  messagesContainer.className = "inline-chat-messages";
+
+  if (Array.isArray(inlineChat.messages)) {
+    inlineChat.messages.forEach((msg, idx) => {
+      const msgEl = document.createElement("div");
+      msgEl.className = `inline-msg ${msg.role}`;
+
+      const textEl = document.createElement("div");
+      textEl.className = "inline-msg-text markdown";
+
+      if (msg.role === "assistant") {
+        const assistantText = extractAssistantText(msg.content);
+        if (!assistantText && idx === inlineChat.messages.length - 1) {
+          // This is a pending message, show thinking indicator
+          msgEl.classList.add("pending");
+          const indicator = document.createElement("span");
+          indicator.className = "inline-thinking-indicator";
+          textEl.innerHTML = "";
+          textEl.appendChild(indicator);
+          const thinkingText = document.createElement("span");
+          thinkingText.textContent = "Thinking...";
+          thinkingText.style.fontStyle = "italic";
+          thinkingText.style.color = "var(--muted)";
+          textEl.appendChild(thinkingText);
+        } else {
+          textEl.innerHTML = renderMarkdown(assistantText);
+        }
+      } else if (msg.role === "user") {
+        const { text } = parseUserContent(msg.content);
+        textEl.textContent = text;
+      }
+
+      msgEl.appendChild(textEl);
+      messagesContainer.appendChild(msgEl);
+    });
+  }
+
+  body.appendChild(messagesContainer);
+
+  // Input
+  const inputWrapper = createInlineChatInput(messageIndex, inlineChat.id);
+  body.appendChild(inputWrapper);
+
+  // Add right-click context menu
+  container.addEventListener("contextmenu", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    showInlineChatContextMenu(e.pageX, e.pageY, messageIndex, inlineChat.id);
+  });
+
+  container.appendChild(header);
+  container.appendChild(body);
+
+  return container;
+}
+
+function renderInlineChats(msgElement, inlineChats, messageIndex) {
+  console.log("renderInlineChats called", msgElement, inlineChats, messageIndex);
+  if (!Array.isArray(inlineChats) || inlineChats.length === 0) {
+    console.log("No inline chats to render");
+    return;
+  }
+
+  const bubble = msgElement.querySelector(".bubble");
+  if (!bubble) {
+    console.log("No bubble found");
+    return;
+  }
+
+  const textElement = bubble.querySelector(".text");
+  if (!textElement) {
+    console.log("No text element found");
+    return;
+  }
+
+  // Sort inline chats by their position in the text (earliest first)
+  const sortedChats = [...inlineChats].sort((a, b) =>
+    a.quotedTextIndices.start - b.quotedTextIndices.start
+  );
+
+  // Try to insert each inline chat near its quoted text location
+  sortedChats.forEach((inlineChat) => {
+    console.log("Rendering inline chat:", inlineChat.id);
+    const inlineChatEl = createInlineChatElement(inlineChat, messageIndex);
+
+    // Try to find the quoted text in the rendered content
+    const quotedText = inlineChat.quotedText;
+    let insertionPoint = null;
+
+    // Walk through text nodes to find the quoted text
+    const walker = document.createTreeWalker(
+      textElement,
+      NodeFilter.SHOW_TEXT,
+      null,
+      false
+    );
+
+    let currentPos = 0;
+    let targetStart = inlineChat.quotedTextIndices.start;
+    let foundNode = null;
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const nodeText = node.textContent;
+      const nodeLength = nodeText.length;
+
+      // Check if our target position is within this text node
+      if (currentPos <= targetStart && targetStart < currentPos + nodeLength) {
+        foundNode = node;
+        break;
+      }
+
+      currentPos += nodeLength;
+    }
+
+    // If we found a node near the quoted text, insert after its parent element
+    if (foundNode && foundNode.parentElement) {
+      let insertAfter = foundNode.parentElement;
+
+      // Walk up to find a good insertion point (like a paragraph)
+      while (insertAfter && insertAfter !== textElement) {
+        if (insertAfter.tagName === 'P' || insertAfter.tagName === 'DIV' || insertAfter.tagName === 'LI') {
+          break;
+        }
+        insertAfter = insertAfter.parentElement;
+      }
+
+      if (insertAfter && insertAfter.parentElement) {
+        insertAfter.parentElement.insertBefore(inlineChatEl, insertAfter.nextSibling);
+        insertionPoint = insertAfter;
+      }
+    }
+
+    // Fallback: insert before actions element
+    if (!insertionPoint) {
+      const actions = bubble.querySelector(".actions");
+      if (actions) {
+        bubble.insertBefore(inlineChatEl, actions);
+      } else {
+        bubble.appendChild(inlineChatEl);
+      }
+    }
+
+    console.log("Inline chat element added to DOM");
+  });
+}
+
+async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
+  console.log("=== sendInlineChatMessage START ===");
+  console.log("messageIndex:", messageIndex, "inlineChatId:", inlineChatId, "userText:", userText);
+
+  const apiKey = apiKeyInput.value.trim();
+  console.log("API key present:", !!apiKey);
+
+  if (!apiKey) {
+    alert("Please enter your API key in the settings.");
+    return;
+  }
+
+  const message = state.messages[messageIndex];
+  console.log("Message found:", !!message);
+
+  if (!message || !message.inlineChats) {
+    console.log("No message or no inlineChats array");
+    return;
+  }
+
+  const inlineChat = message.inlineChats.find((chat) => chat.id === inlineChatId);
+  console.log("Inline chat found:", !!inlineChat);
+
+  if (!inlineChat) {
+    console.log("Inline chat not found!");
+    return;
+  }
+
+  // Add user message to inline chat
+  // For the first message, include the quoted text as context
+  let messageText = userText;
+  if (inlineChat.messages.length === 0) {
+    messageText = `Regarding this part of your previous response:\n"${inlineChat.quotedText}"\n\n${userText}`;
+    console.log("First message in inline chat, adding quoted context");
+  }
+
+  const userMessage = {
+    role: "user",
+    content: [{ type: "input_text", text: messageText }],
+  };
+  inlineChat.messages.push(userMessage);
+  inlineChat.updatedAt = Date.now();
+  console.log("User message added, inline chat now has", inlineChat.messages.length, "messages");
+
+  // Create pending assistant message
+  const assistantMessage = {
+    role: "assistant",
+    content: [{ type: "output_text", text: "" }],
+  };
+  inlineChat.messages.push(assistantMessage);
+  console.log("Assistant message placeholder added");
+
+  saveSessions();
+  console.log("Sessions saved, re-rendering chat");
+  renderChatMessages();
+
+  // Find the inline chat element and messages container
+  const inlineChatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
+  if (!inlineChatEl) return;
+
+  // Scroll to the inline chat to keep it in view
+  inlineChatEl.scrollIntoView({ behavior: "smooth", block: "center" });
+
+  const messagesContainer = inlineChatEl.querySelector(".inline-chat-messages");
+  if (!messagesContainer) return;
+
+  // Add pending indicator to last message
+  const lastMsg = messagesContainer.lastElementChild;
+  if (lastMsg) {
+    lastMsg.classList.add("pending");
+  }
+
+  // Build context messages
+  const inputMessages = buildInlineChatInputMessages(messageIndex, inlineChatId);
+  console.log("Built input messages, count:", inputMessages.length);
+  console.log("Context includes:", inputMessages.map(m => `${m.role}: ${JSON.stringify(m.content).substring(0, 50)}...`));
+
+  // Prepare API payload
+  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const reasoning = composerReasoning ? composerReasoning.value : "default";
+  const systemPrompt = systemPromptInput.value || "You are a helpful assistant.";
+
+  const payload = {
+    model: model,
+    input: inputMessages,
+    stream: true,
+  };
+
+  // Add system prompt as instructions
+  if (systemPrompt) {
+    payload.instructions = systemPrompt;
+  }
+
+  // Add reasoning if not default
+  if (reasoning && reasoning !== "default" && reasoning !== "none") {
+    payload.reasoning = { effort: reasoning };
+  }
+
+  let assistantText = "";
+
+  console.log("About to make API call with payload:", JSON.stringify(payload, null, 2));
+
+  try {
+    console.log("Fetching /api/responses...");
+    const response = await fetch("/api/responses", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${apiKey}`,
+      },
+      body: JSON.stringify(payload),
+    });
+
+    console.log("Response received, status:", response.status, "ok:", response.ok);
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let message = `Request failed (${response.status}).`;
+      try {
+        const errorJson = JSON.parse(errorText);
+        message = errorJson?.error?.message || message;
+      } catch (error) {
+        if (errorText) {
+          message = errorText;
+        }
+      }
+      throw new Error(message);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    const isStream = contentType.includes("text/event-stream") && response.body;
+    console.log("Content-Type:", contentType, "isStream:", isStream);
+
+    if (isStream) {
+      console.log("Starting stream processing...");
+      await streamResponse(response, (data) => {
+        if (!data || data === "[DONE]") {
+          console.log("Stream done or empty data");
+          return;
+        }
+
+        let event;
+        try {
+          event = JSON.parse(data);
+          console.log("Stream event:", event.type, event);
+        } catch (error) {
+          console.log("Failed to parse stream data:", error);
+          return;
+        }
+
+        switch (event.type) {
+          case "response.output_text.delta":
+            console.log("Delta:", event.delta);
+            if (event.delta) {
+              assistantText += event.delta;
+              // Update the last message in the inline chat
+              if (lastMsg) {
+                const textEl = lastMsg.querySelector(".inline-msg-text");
+                if (textEl) {
+                  textEl.innerHTML = renderMarkdown(assistantText);
+                }
+              }
+              // Scroll to bottom
+              messagesContainer.scrollTop = messagesContainer.scrollHeight;
+            }
+            break;
+
+          case "response.output_text.done":
+            console.log("Output text done");
+            if (!assistantText && event.text) {
+              assistantText = event.text;
+              if (lastMsg) {
+                const textEl = lastMsg.querySelector(".inline-msg-text");
+                if (textEl) {
+                  textEl.innerHTML = renderMarkdown(assistantText);
+                }
+              }
+            }
+            break;
+
+          case "response.completed":
+            console.log("Response completed");
+            // Remove pending state
+            if (lastMsg) {
+              lastMsg.classList.remove("pending");
+            }
+
+            // Update the stored message
+            assistantMessage.content = [{ type: "output_text", text: assistantText }];
+            inlineChat.updatedAt = Date.now();
+            saveSessions();
+            break;
+
+          case "error":
+            throw new Error(event.error?.message || "Unknown error");
+
+          default:
+            console.log("Unhandled event type:", event.type);
+        }
+      });
+    } else {
+      // Non-streaming response
+      const data = await response.json();
+      const outputText = data?.output?.[0]?.content?.[0]?.text || "";
+      assistantText = outputText;
+
+      assistantMessage.content = [{ type: "output_text", text: assistantText }];
+      inlineChat.updatedAt = Date.now();
+
+      if (lastMsg) {
+        lastMsg.classList.remove("pending");
+        const textEl = lastMsg.querySelector(".inline-msg-text");
+        if (textEl) {
+          textEl.innerHTML = renderMarkdown(assistantText);
+        }
+      }
+
+      saveSessions();
+    }
+  } catch (error) {
+    console.error("Inline chat error:", error);
+
+    // Remove the failed assistant message
+    inlineChat.messages.pop();
+    saveSessions();
+    renderChatMessages();
+
+    throw error;
+  }
+
+  console.log("=== sendInlineChatMessage END ===");
 }
 
 function rememberKeyIfNeeded() {
@@ -1296,7 +2056,7 @@ async function uploadPdfAttachment(file, apiKey) {
   formData.append("purpose", "user_data");
   formData.append("file", file, file.name || "document.pdf");
 
-  const response = await fetch("https://api.openai.com/v1/files", {
+  const response = await fetch("/api/files", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -1330,7 +2090,7 @@ async function uploadFileForSearch(file, apiKey) {
   formData.append("purpose", "assistants");
   formData.append("file", file, file.name);
 
-  const response = await fetch("https://api.openai.com/v1/files", {
+  const response = await fetch("/api/files", {
     method: "POST",
     headers: {
       Authorization: `Bearer ${apiKey}`,
@@ -1360,7 +2120,7 @@ async function uploadFileForSearch(file, apiKey) {
 }
 
 async function createVectorStore(apiKey, name = "WeiChat Files") {
-  const response = await fetch("https://api.openai.com/v1/vector_stores", {
+  const response = await fetch("/api/vector_stores", {
     method: "POST",
     headers: {
       "Content-Type": "application/json",
@@ -1380,7 +2140,7 @@ async function createVectorStore(apiKey, name = "WeiChat Files") {
 
 async function addFileToVectorStore(apiKey, vectorStoreId, fileId) {
   const response = await fetch(
-    `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
+    `/api/vector_stores/${vectorStoreId}/files`,
     {
       method: "POST",
       headers: {
@@ -1408,7 +2168,7 @@ async function getOrCreateVectorStore(apiKey) {
     // Verify it still exists
     try {
       const response = await fetch(
-        `https://api.openai.com/v1/vector_stores/${vectorStoreId}`,
+        `/api/vector_stores/${vectorStoreId}`,
         {
           headers: { Authorization: `Bearer ${apiKey}` },
         }
@@ -1447,7 +2207,7 @@ function getCurrentVectorStoreId() {
 
 async function listVectorStoreFiles(apiKey, vectorStoreId) {
   const response = await fetch(
-    `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files`,
+    `/api/vector_stores/${vectorStoreId}/files`,
     {
       headers: { Authorization: `Bearer ${apiKey}` },
     }
@@ -1463,7 +2223,7 @@ async function listVectorStoreFiles(apiKey, vectorStoreId) {
 
 async function getFileInfo(apiKey, fileId) {
   const response = await fetch(
-    `https://api.openai.com/v1/files/${fileId}`,
+    `/api/files/${fileId}`,
     {
       headers: { Authorization: `Bearer ${apiKey}` },
     }
@@ -1478,7 +2238,7 @@ async function getFileInfo(apiKey, fileId) {
 
 async function removeFileFromVectorStore(apiKey, vectorStoreId, fileId) {
   const response = await fetch(
-    `https://api.openai.com/v1/vector_stores/${vectorStoreId}/files/${fileId}`,
+    `/api/vector_stores/${vectorStoreId}/files/${fileId}`,
     {
       method: "DELETE",
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -1521,7 +2281,7 @@ function trackUploadedFile(fileId, fileName, fileSize) {
 
 async function deleteVectorStore(apiKey, vectorStoreId) {
   const response = await fetch(
-    `https://api.openai.com/v1/vector_stores/${vectorStoreId}`,
+    `/api/vector_stores/${vectorStoreId}`,
     {
       method: "DELETE",
       headers: { Authorization: `Bearer ${apiKey}` },
@@ -1971,7 +2731,7 @@ async function generateChatTitle(userMessage, apiKey) {
   }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
+    const response = await fetch("/api/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -2455,6 +3215,7 @@ function hideGroupContextMenu() {
 function hideAllContextMenus() {
   hideChatContextMenu();
   hideGroupContextMenu();
+  hideInlineChatContextMenu();
 }
 
 function openMoveToProjectModal(sessionId) {
@@ -2882,7 +3643,7 @@ async function sendAssistantResponse() {
   let usageTotal = 0;
 
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
+    const response = await fetch("/api/responses", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -3575,9 +4336,151 @@ document.addEventListener("click", (event) => {
       hideGroupContextMenu();
     }
   }
+  if (inlineChatContextMenu && !inlineChatContextMenu.hidden) {
+    if (!inlineChatContextMenu.contains(event.target)) {
+      hideInlineChatContextMenu();
+    }
+  }
+  // Hide selection popup when clicking outside
+  if (selectionPopup && !selectionPopup.hasAttribute('hidden')) {
+    if (!selectionPopup.contains(event.target)) {
+      hideSelectionPopup();
+    }
+  }
 });
 
 window.addEventListener("resize", hideAllContextMenus);
+
+// Text selection for inline chats
+chatLog.addEventListener("mouseup", (event) => {
+  console.log("Mouseup event triggered");
+
+  // Don't show popup if currently sending
+  if (state.sending) {
+    hideSelectionPopup();
+    return;
+  }
+
+  const selection = window.getSelection();
+  const selectedText = selection.toString().trim();
+  console.log("Selected:", selectedText.length, "chars");
+
+  // Minimum selection length
+  if (selectedText.length < 3) {
+    hideSelectionPopup();
+    return;
+  }
+
+  // Check if selection has a valid range
+  if (selection.rangeCount === 0) {
+    hideSelectionPopup();
+    return;
+  }
+
+  // Find the message element by traversing up from the range's common ancestor
+  const range = selection.getRangeAt(0);
+  let targetElement = range.commonAncestorContainer;
+
+  // If it's a text node, get its parent element
+  if (targetElement.nodeType === Node.TEXT_NODE) {
+    targetElement = targetElement.parentElement;
+  }
+
+  let textElement = null;
+  let messageElement = null;
+
+  // Traverse up to find .text and .msg elements
+  let current = targetElement;
+  while (current && current !== chatLog) {
+    if (!textElement && current.classList && current.classList.contains("text")) {
+      textElement = current;
+    }
+    if (!messageElement && current.classList && current.classList.contains("msg")) {
+      messageElement = current;
+      break;
+    }
+    current = current.parentElement;
+  }
+
+  // Only show popup for assistant messages with text element
+  if (!messageElement || !messageElement.classList.contains("assistant") || !textElement) {
+    hideSelectionPopup();
+    return;
+  }
+
+  // Find message index from actions element
+  const actionsElement = messageElement.querySelector(".actions");
+  if (!actionsElement || !actionsElement.dataset.messageIndex) {
+    hideSelectionPopup();
+    return;
+  }
+
+  const messageIndex = parseInt(actionsElement.dataset.messageIndex, 10);
+  if (isNaN(messageIndex)) {
+    hideSelectionPopup();
+    return;
+  }
+
+  // Calculate character indices (approximate)
+  const preSelectionRange = range.cloneRange();
+  preSelectionRange.selectNodeContents(textElement);
+  preSelectionRange.setEnd(range.startContainer, range.startOffset);
+  const startIndex = preSelectionRange.toString().length;
+  const endIndex = startIndex + selectedText.length;
+
+  // Store selection info
+  state.currentSelection = {
+    text: selectedText,
+    messageIndex: messageIndex,
+    indices: { start: startIndex, end: endIndex },
+  };
+
+  // Show popup near cursor
+  const x = event.pageX + 10;
+  const y = event.pageY + 10;
+
+  // Use setTimeout to show popup after the current event cycle
+  // This prevents the click event from immediately hiding it
+  setTimeout(() => {
+    showSelectionPopup(x, y);
+  }, 10);
+});
+
+// Escape key to hide popup
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && selectionPopup && !selectionPopup.hasAttribute('hidden')) {
+    hideSelectionPopup();
+  }
+});
+
+// Quote and ask button
+if (quoteAndAskBtn) {
+  quoteAndAskBtn.addEventListener("click", () => {
+    console.log("Quote and ask clicked, currentSelection:", state.currentSelection);
+    if (state.currentSelection) {
+      createInlineChat(
+        state.currentSelection.messageIndex,
+        state.currentSelection.text,
+        state.currentSelection.indices
+      );
+      hideSelectionPopup();
+    } else {
+      console.log("No current selection!");
+    }
+  });
+}
+
+// Delete inline chat button
+if (deleteInlineChatBtn) {
+  deleteInlineChatBtn.addEventListener("click", () => {
+    if (state.contextInlineChatMessageIndex !== null && state.contextInlineChatId) {
+      if (confirm("Delete this inline chat?")) {
+        deleteInlineChat(state.contextInlineChatMessageIndex, state.contextInlineChatId);
+        hideInlineChatContextMenu();
+      }
+    }
+  });
+}
 
 if (renameChatBtn) {
   renameChatBtn.addEventListener("click", () => {
@@ -4145,10 +5048,10 @@ async function downloadFileFromAPI(containerId, fileId, filename) {
     let url;
     if (containerId && fileId.startsWith('cfile_')) {
       // Container file from code interpreter
-      url = `https://api.openai.com/v1/containers/${containerId}/files/${fileId}/content`;
+      url = `/api/containers/${containerId}/files/${fileId}/content`;
     } else {
       // Regular file
-      url = `https://api.openai.com/v1/files/${fileId}/content`;
+      url = `/api/files/${fileId}/content`;
     }
 
     const response = await fetch(url, {

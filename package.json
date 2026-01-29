@@ -1,0 +1,16 @@
+{
+  "name": "weichat",
+  "version": "1.0.0",
+  "description": "OpenAI API Chat UI with proxy server",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "keywords": [
+    "openai",
+    "chat",
+    "proxy"
+  ],
+  "author": "",
+  "license": "MIT"
+}
