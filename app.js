@@ -1329,7 +1329,7 @@ function buildInlineChatInputMessages(messageIndex, inlineChatId) {
   // Find the inline chat and append its history
   const parentMessage = state.messages[messageIndex];
   if (parentMessage && parentMessage.inlineChats) {
-    const inlineChat = parentMessage.inlineChats.find((chat) => chat.id === inlineChatId);
+    const inlineChat = findInlineChatRecursive(parentMessage.inlineChats, inlineChatId);
     if (inlineChat && Array.isArray(inlineChat.messages)) {
       return [...normalizedMain, ...inlineChat.messages];
     }
@@ -1440,11 +1440,62 @@ function createInlineChat(messageIndex, quotedText, quotedIndices) {
   }, 100);
 }
 
+function createNestedInlineChat(messageIndex, parentInlineChatId, inlineMsgIndex, quotedText, quotedIndices) {
+  console.log("createNestedInlineChat called", messageIndex, parentInlineChatId, inlineMsgIndex, quotedText, quotedIndices);
+  const message = state.messages[messageIndex];
+  if (!message || !message.inlineChats) return;
+
+  const parentChat = findInlineChatRecursive(message.inlineChats, parentInlineChatId);
+  if (!parentChat || !parentChat.messages || !parentChat.messages[inlineMsgIndex]) return;
+
+  const targetMsg = parentChat.messages[inlineMsgIndex];
+  if (targetMsg.role !== "assistant") return;
+
+  if (!Array.isArray(targetMsg.inlineChats)) {
+    targetMsg.inlineChats = [];
+  }
+
+  if (targetMsg.inlineChats.length >= 5) {
+    alert("Maximum of 5 nested inline chats per message reached.");
+    return;
+  }
+
+  const maxQuoteLength = 500;
+  let displayQuote = quotedText.length > maxQuoteLength
+    ? quotedText.substring(0, maxQuoteLength) + "..."
+    : quotedText;
+
+  const inlineChat = {
+    id: generateUUID(),
+    quotedText: displayQuote,
+    quotedTextIndices: quotedIndices,
+    messages: [],
+    collapsed: false,
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+  };
+
+  targetMsg.inlineChats.push(inlineChat);
+  saveSessions();
+  renderChatMessages();
+
+  setTimeout(() => {
+    const inlineChatEl = document.querySelector(`[data-inline-chat-id="${inlineChat.id}"]`);
+    if (inlineChatEl) {
+      const input = inlineChatEl.querySelector(".inline-chat-input");
+      if (input) {
+        input.focus();
+        inlineChatEl.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      }
+    }
+  }, 100);
+}
+
 function toggleInlineChat(messageIndex, inlineChatId) {
   const message = state.messages[messageIndex];
   if (!message || !message.inlineChats) return;
 
-  const inlineChat = message.inlineChats.find((chat) => chat.id === inlineChatId);
+  const inlineChat = findInlineChatRecursive(message.inlineChats, inlineChatId);
   if (!inlineChat) return;
 
   // Toggle the collapsed state
@@ -1458,27 +1509,33 @@ function toggleInlineChat(messageIndex, inlineChatId) {
     } else {
       inlineChatEl.classList.remove('collapsed');
     }
-
-    // Update the button text
-    const collapseBtn = inlineChatEl.querySelector('.inline-chat-collapse-btn:last-child');
-    if (collapseBtn) {
-      collapseBtn.textContent = inlineChat.collapsed ? "+" : "−";
-      collapseBtn.title = inlineChat.collapsed ? "Expand" : "Collapse";
-    }
   }
 
   saveSessions();
+}
+
+function deleteInlineChatFromArray(inlineChats, targetId) {
+  if (!Array.isArray(inlineChats)) return false;
+  const index = inlineChats.findIndex((chat) => chat.id === targetId);
+  if (index !== -1) {
+    inlineChats.splice(index, 1);
+    return true;
+  }
+  for (const chat of inlineChats) {
+    if (chat.messages) {
+      for (const msg of chat.messages) {
+        if (deleteInlineChatFromArray(msg.inlineChats, targetId)) return true;
+      }
+    }
+  }
+  return false;
 }
 
 function deleteInlineChat(messageIndex, inlineChatId) {
   const message = state.messages[messageIndex];
   if (!message || !message.inlineChats) return;
 
-  const index = message.inlineChats.findIndex((chat) => chat.id === inlineChatId);
-  if (index !== -1) {
-    // Remove from data
-    message.inlineChats.splice(index, 1);
-
+  if (deleteInlineChatFromArray(message.inlineChats, inlineChatId)) {
     // Remove from DOM directly to avoid scroll jumping
     const inlineChatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
     if (inlineChatEl) {
@@ -1500,6 +1557,116 @@ function generateUUID() {
     const v = c === 'x' ? r : (r & 0x3 | 0x8);
     return v.toString(16);
   });
+}
+
+function highlightQuotedText(messageIndex, quotedText, highlight) {
+  console.log("highlightQuotedText called:", { messageIndex, quotedText: quotedText.substring(0, 50), highlight });
+
+  // Find the message element by looking for the actions element with matching data-message-index
+  const actionsElement = document.querySelector(`.actions[data-message-index="${messageIndex}"]`);
+  console.log("actionsElement found:", !!actionsElement);
+
+  if (!actionsElement) {
+    console.log("Message with index", messageIndex, "not found");
+    return;
+  }
+
+  // Get the parent message element
+  const msgElement = actionsElement.closest('.msg');
+  console.log("msgElement found:", !!msgElement);
+
+  if (!msgElement) {
+    console.log("Could not find parent .msg element");
+    return;
+  }
+
+  const textElement = msgElement.querySelector('.text');
+  console.log("textElement found:", !!textElement);
+  if (!textElement) return;
+
+  // Remove any existing highlights first
+  const existingHighlights = textElement.querySelectorAll('.quoted-text-highlight');
+  console.log("Removing", existingHighlights.length, "existing highlights");
+
+  existingHighlights.forEach(span => {
+    const parent = span.parentNode;
+    parent.replaceChild(document.createTextNode(span.textContent), span);
+    parent.normalize(); // Merge adjacent text nodes
+  });
+
+  if (highlight) {
+    // Get all text content to search
+    const fullText = textElement.textContent;
+    console.log("Full text length:", fullText.length);
+    console.log("Looking for quoted text:", quotedText.substring(0, 50) + "...");
+    console.log("Found in full text:", fullText.includes(quotedText));
+
+    const targetStart = fullText.indexOf(quotedText);
+    const targetEnd = targetStart + quotedText.length;
+
+    console.log("Target position:", targetStart, "to", targetEnd);
+
+    if (targetStart === -1) {
+      console.log("Quoted text not found in message!");
+      return;
+    }
+
+    // Collect all text nodes and their positions
+    const walker = document.createTreeWalker(
+      textElement,
+      NodeFilter.SHOW_TEXT,
+      null,
+      false
+    );
+
+    const textNodes = [];
+    let currentPos = 0;
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const nodeLength = node.textContent.length;
+      textNodes.push({
+        node: node,
+        start: currentPos,
+        end: currentPos + nodeLength,
+      });
+      currentPos += nodeLength;
+    }
+
+    console.log("Found", textNodes.length, "text nodes");
+
+    // Find and highlight all nodes that intersect with the target range
+    textNodes.forEach((nodeInfo) => {
+      const { node, start, end } = nodeInfo;
+
+      // Check if this node overlaps with the target range
+      if (start < targetEnd && end > targetStart) {
+        const highlightStart = Math.max(0, targetStart - start);
+        const highlightEnd = Math.min(node.textContent.length, targetEnd - start);
+
+        const before = node.textContent.substring(0, highlightStart);
+        const quoted = node.textContent.substring(highlightStart, highlightEnd);
+        const after = node.textContent.substring(highlightEnd);
+
+        console.log("Highlighting in node:", { before: before.substring(0, 20), quoted: quoted.substring(0, 30), after: after.substring(0, 20) });
+
+        const span = document.createElement('span');
+        span.className = 'quoted-text-highlight';
+        span.textContent = quoted;
+
+        const parent = node.parentNode;
+        const fragment = document.createDocumentFragment();
+
+        if (before) fragment.appendChild(document.createTextNode(before));
+        fragment.appendChild(span);
+        if (after) fragment.appendChild(document.createTextNode(after));
+
+        parent.replaceChild(fragment, node);
+      }
+    });
+
+    console.log("Highlight applied across", textNodes.filter(n => n.start < targetEnd && n.end > targetStart).length, "nodes");
+  }
 }
 
 function createInlineChatInput(messageIndex, inlineChatId) {
@@ -1597,21 +1764,17 @@ function createInlineChatElement(inlineChat, messageIndex) {
   quote.appendChild(badge);
   quote.appendChild(quoteText);
 
-  const controls = document.createElement("div");
-  controls.className = "inline-chat-controls";
-
-  const collapseBtn = document.createElement("button");
-  collapseBtn.className = "inline-chat-collapse-btn";
-  collapseBtn.textContent = inlineChat.collapsed ? "+" : "−";
-  collapseBtn.title = inlineChat.collapsed ? "Expand" : "Collapse";
-  collapseBtn.addEventListener("click", (e) => {
-    e.stopPropagation();
+  // Make header clickable to toggle
+  header.style.cursor = "pointer";
+  header.addEventListener("click", (e) => {
+    // Don't toggle if clicking inside input or buttons
+    if (e.target.closest(".inline-chat-input") || e.target.closest("button")) {
+      return;
+    }
     toggleInlineChat(messageIndex, inlineChat.id);
   });
 
-  controls.appendChild(collapseBtn);
   header.appendChild(quote);
-  header.appendChild(controls);
 
   // Body
   const body = document.createElement("div");
@@ -1625,18 +1788,19 @@ function createInlineChatElement(inlineChat, messageIndex) {
     inlineChat.messages.forEach((msg, idx) => {
       const msgEl = document.createElement("div");
       msgEl.className = `inline-msg ${msg.role}`;
+      msgEl.dataset.inlineMsgIndex = idx;
 
       const textEl = document.createElement("div");
-      textEl.className = "inline-msg-text markdown";
+      textEl.className = "inline-msg-text";
 
       if (msg.role === "assistant") {
         const assistantText = extractAssistantText(msg.content);
         if (!assistantText && idx === inlineChat.messages.length - 1) {
           // This is a pending message, show thinking indicator
           msgEl.classList.add("pending");
+          textEl.className = "inline-msg-text";
           const indicator = document.createElement("span");
           indicator.className = "inline-thinking-indicator";
-          textEl.innerHTML = "";
           textEl.appendChild(indicator);
           const thinkingText = document.createElement("span");
           thinkingText.textContent = "Thinking...";
@@ -1644,7 +1808,12 @@ function createInlineChatElement(inlineChat, messageIndex) {
           thinkingText.style.color = "var(--muted)";
           textEl.appendChild(thinkingText);
         } else {
-          textEl.innerHTML = renderMarkdown(assistantText);
+          renderMarkdownInto(textEl, assistantText);
+
+          // Render nested inline chats if this message has any
+          if (msg.inlineChats && msg.inlineChats.length > 0) {
+            renderNestedInlineChats(textEl, msg.inlineChats, messageIndex);
+          }
         }
       } else if (msg.role === "user") {
         const { text } = parseUserContent(msg.content);
@@ -1669,10 +1838,93 @@ function createInlineChatElement(inlineChat, messageIndex) {
     showInlineChatContextMenu(e.pageX, e.pageY, messageIndex, inlineChat.id);
   });
 
+  // Add hover effect to highlight quoted text
+  container.addEventListener("mouseenter", () => {
+    highlightQuotedText(messageIndex, inlineChat.quotedText, true);
+  });
+
+  container.addEventListener("mouseleave", () => {
+    highlightQuotedText(messageIndex, inlineChat.quotedText, false);
+  });
+
   container.appendChild(header);
   container.appendChild(body);
 
   return container;
+}
+
+function renderNestedInlineChats(textElement, inlineChats, messageIndex) {
+  console.log("renderNestedInlineChats called", textElement, inlineChats, messageIndex);
+  if (!Array.isArray(inlineChats) || inlineChats.length === 0) {
+    console.log("No nested inline chats to render");
+    return;
+  }
+
+  // Sort inline chats by their position in the text (earliest first)
+  const sortedChats = [...inlineChats].sort((a, b) =>
+    a.quotedTextIndices.start - b.quotedTextIndices.start
+  );
+
+  // Try to insert each inline chat near its quoted text location
+  sortedChats.forEach((inlineChat) => {
+    console.log("Rendering nested inline chat:", inlineChat.id);
+    const inlineChatEl = createInlineChatElement(inlineChat, messageIndex);
+
+    // Try to find the quoted text in the rendered content
+    const walker = document.createTreeWalker(
+      textElement,
+      NodeFilter.SHOW_TEXT,
+      null,
+      false
+    );
+
+    let currentPos = 0;
+    let targetStart = inlineChat.quotedTextIndices.start;
+    let foundNode = null;
+
+    while (walker.nextNode()) {
+      const node = walker.currentNode;
+      const nodeLength = node.textContent.length;
+
+      if (currentPos <= targetStart && targetStart < currentPos + nodeLength) {
+        foundNode = node;
+        break;
+      }
+
+      currentPos += nodeLength;
+    }
+
+    // If we found a node near the quoted text, insert after its parent block element
+    if (foundNode && foundNode.parentElement) {
+      let insertAfter = foundNode.parentElement;
+
+      // Walk up to find a block-level insertion point
+      const blockTags = new Set(['P', 'DIV', 'LI', 'PRE', 'BLOCKQUOTE', 'TABLE', 'UL', 'OL', 'H1', 'H2', 'H3', 'H4', 'H5', 'H6', 'HR']);
+      while (insertAfter && insertAfter !== textElement) {
+        if (blockTags.has(insertAfter.tagName)) {
+          break;
+        }
+        insertAfter = insertAfter.parentElement;
+      }
+
+      // If we found a block element that's a child of textElement, insert after it
+      if (insertAfter && insertAfter !== textElement && insertAfter.parentElement) {
+        // Walk up to ensure we insert as a direct child of textElement
+        while (insertAfter.parentElement && insertAfter.parentElement !== textElement) {
+          insertAfter = insertAfter.parentElement;
+        }
+        if (insertAfter.parentElement === textElement) {
+          textElement.insertBefore(inlineChatEl, insertAfter.nextSibling);
+          console.log("Nested inline chat element inserted near quoted text");
+          return;
+        }
+      }
+    }
+
+    // Fallback: append to text element
+    textElement.appendChild(inlineChatEl);
+    console.log("Nested inline chat element appended to text element");
+  });
 }
 
 function renderInlineChats(msgElement, inlineChats, messageIndex) {
@@ -1701,7 +1953,7 @@ function renderInlineChats(msgElement, inlineChats, messageIndex) {
 
   // Try to insert each inline chat near its quoted text location
   sortedChats.forEach((inlineChat) => {
-    console.log("Rendering inline chat:", inlineChat.id);
+    console.log("Rendering inline chat:", inlineChat.id, "indices:", inlineChat.quotedTextIndices);
     const inlineChatEl = createInlineChatElement(inlineChat, messageIndex);
 
     // Try to find the quoted text in the rendered content
@@ -1766,6 +2018,22 @@ function renderInlineChats(msgElement, inlineChats, messageIndex) {
   });
 }
 
+function findInlineChatRecursive(inlineChats, targetId) {
+  if (!Array.isArray(inlineChats)) return null;
+  for (const chat of inlineChats) {
+    if (chat.id === targetId) return chat;
+    if (chat.messages) {
+      for (const msg of chat.messages) {
+        if (msg.inlineChats) {
+          const found = findInlineChatRecursive(msg.inlineChats, targetId);
+          if (found) return found;
+        }
+      }
+    }
+  }
+  return null;
+}
+
 async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
   console.log("=== sendInlineChatMessage START ===");
   console.log("messageIndex:", messageIndex, "inlineChatId:", inlineChatId, "userText:", userText);
@@ -1786,7 +2054,7 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
     return;
   }
 
-  const inlineChat = message.inlineChats.find((chat) => chat.id === inlineChatId);
+  const inlineChat = findInlineChatRecursive(message.inlineChats, inlineChatId);
   console.log("Inline chat found:", !!inlineChat);
 
   if (!inlineChat) {
@@ -1925,7 +2193,7 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
               if (lastMsg) {
                 const textEl = lastMsg.querySelector(".inline-msg-text");
                 if (textEl) {
-                  textEl.innerHTML = renderMarkdown(assistantText);
+                  renderMarkdownInto(textEl, assistantText);
                 }
               }
               // Scroll to bottom
@@ -1940,7 +2208,7 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
               if (lastMsg) {
                 const textEl = lastMsg.querySelector(".inline-msg-text");
                 if (textEl) {
-                  textEl.innerHTML = renderMarkdown(assistantText);
+                  renderMarkdownInto(textEl, assistantText);
                 }
               }
             }
@@ -1979,7 +2247,7 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
         lastMsg.classList.remove("pending");
         const textEl = lastMsg.querySelector(".inline-msg-text");
         if (textEl) {
-          textEl.innerHTML = renderMarkdown(assistantText);
+          renderMarkdownInto(textEl, assistantText);
         }
       }
 
@@ -4387,11 +4655,23 @@ chatLog.addEventListener("mouseup", (event) => {
   }
 
   let textElement = null;
+  let inlineMsgTextElement = null;
+  let inlineChatElement = null;
+  let inlineMsgElement = null;
   let messageElement = null;
 
-  // Traverse up to find .text and .msg elements
+  // Traverse up to find relevant elements
   let current = targetElement;
   while (current && current !== chatLog) {
+    if (!inlineMsgTextElement && current.classList && current.classList.contains("inline-msg-text")) {
+      inlineMsgTextElement = current;
+    }
+    if (!inlineMsgElement && current.classList && current.classList.contains("inline-msg")) {
+      inlineMsgElement = current;
+    }
+    if (!inlineChatElement && current.classList && current.classList.contains("inline-chat")) {
+      inlineChatElement = current;
+    }
     if (!textElement && current.classList && current.classList.contains("text")) {
       textElement = current;
     }
@@ -4402,8 +4682,8 @@ chatLog.addEventListener("mouseup", (event) => {
     current = current.parentElement;
   }
 
-  // Only show popup for assistant messages with text element
-  if (!messageElement || !messageElement.classList.contains("assistant") || !textElement) {
+  // Only show popup for assistant messages with text element (or inside an inline chat)
+  if (!messageElement || !messageElement.classList.contains("assistant") || (!textElement && !inlineChatElement)) {
     hideSelectionPopup();
     return;
   }
@@ -4421,9 +4701,20 @@ chatLog.addEventListener("mouseup", (event) => {
     return;
   }
 
-  // Calculate character indices (approximate)
+  // Determine if this is a nested selection (inside an inline chat message)
+  const isNested = !!(inlineMsgTextElement && inlineChatElement && inlineMsgElement);
+
+  // Use the correct text element for index calculation
+  const indexRefElement = isNested ? inlineMsgTextElement : textElement;
+
+  if (!indexRefElement) {
+    hideSelectionPopup();
+    return;
+  }
+
+  // Calculate character indices relative to the correct text element
   const preSelectionRange = range.cloneRange();
-  preSelectionRange.selectNodeContents(textElement);
+  preSelectionRange.selectNodeContents(indexRefElement);
   preSelectionRange.setEnd(range.startContainer, range.startOffset);
   const startIndex = preSelectionRange.toString().length;
   const endIndex = startIndex + selectedText.length;
@@ -4433,6 +4724,9 @@ chatLog.addEventListener("mouseup", (event) => {
     text: selectedText,
     messageIndex: messageIndex,
     indices: { start: startIndex, end: endIndex },
+    isNested: isNested,
+    parentInlineChatId: isNested ? inlineChatElement.dataset.inlineChatId : null,
+    inlineMsgIndex: isNested ? parseInt(inlineMsgElement.dataset.inlineMsgIndex, 10) : null,
   };
 
   // Show popup near cursor
@@ -4458,11 +4752,21 @@ if (quoteAndAskBtn) {
   quoteAndAskBtn.addEventListener("click", () => {
     console.log("Quote and ask clicked, currentSelection:", state.currentSelection);
     if (state.currentSelection) {
-      createInlineChat(
-        state.currentSelection.messageIndex,
-        state.currentSelection.text,
-        state.currentSelection.indices
-      );
+      if (state.currentSelection.isNested) {
+        createNestedInlineChat(
+          state.currentSelection.messageIndex,
+          state.currentSelection.parentInlineChatId,
+          state.currentSelection.inlineMsgIndex,
+          state.currentSelection.text,
+          state.currentSelection.indices
+        );
+      } else {
+        createInlineChat(
+          state.currentSelection.messageIndex,
+          state.currentSelection.text,
+          state.currentSelection.indices
+        );
+      }
       hideSelectionPopup();
     } else {
       console.log("No current selection!");

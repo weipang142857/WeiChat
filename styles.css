@@ -534,6 +534,15 @@ textarea {
   vertical-align: middle;
 }
 
+.quoted-text-highlight {
+  background: color-mix(in srgb, var(--accent) 20%, transparent);
+  border-radius: 3px;
+  padding: 2px 4px;
+  margin: 0 -2px;
+  transition: all 0.2s ease;
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 15%, transparent);
+}
+
 .text .katex-display {
   display: block !important;
   overflow-x: auto;
@@ -743,6 +752,23 @@ textarea {
   transition: all 0.2s ease-out;
 }
 
+/* Nested inline chats (inside .inline-msg-text) */
+.inline-msg-text .inline-chat {
+  margin: 8px 0;
+  border-width: 1px;
+  border-left-width: 3px;
+  background: var(--panel);
+  font-size: 13px;
+}
+
+.inline-msg-text .inline-chat .inline-chat-header {
+  padding: 8px 10px;
+}
+
+.inline-msg-text .inline-chat .quote-text {
+  font-size: 12px;
+}
+
 .inline-chat.collapsed {
   max-width: fit-content;
   background: var(--panel);
@@ -881,6 +907,7 @@ textarea {
   gap: 8px;
   max-height: 300px;
   overflow-y: auto;
+  overflow-x: hidden;
 }
 
 .inline-msg {
@@ -903,12 +930,38 @@ textarea {
   background: var(--panel);
   border: 1px solid var(--border);
   align-self: flex-start;
-  max-width: 95%;
+  max-width: 100%;
 }
 
 .inline-msg-text {
   white-space: pre-wrap;
   word-break: break-word;
+  overflow: visible;
+}
+
+.inline-msg-text .katex,
+.inline-msg-text .katex * {
+  white-space: nowrap !important;
+  word-break: normal !important;
+  overflow-wrap: normal !important;
+}
+
+.inline-msg-text .katex {
+  display: inline-block;
+  line-height: 1.4;
+  vertical-align: middle;
+}
+
+.inline-msg-text .katex-display {
+  display: block !important;
+  overflow-x: auto;
+  margin: 1em 0;
+  text-align: center;
+  white-space: normal !important;
+}
+
+.inline-msg-text .katex-display .katex {
+  display: inline-block;
 }
 
 .inline-msg-text.markdown h1,
