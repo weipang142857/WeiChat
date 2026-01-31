@@ -115,6 +115,7 @@ const state = {
   currentSelection: null, // Stores text selection info for inline chats
   contextInlineChatMessageIndex: null,
   contextInlineChatId: null,
+  parentHistoryExpanded: false,
 };
 
 let fileSavePromise = Promise.resolve();
@@ -578,6 +579,8 @@ function stashMathSegments(text, stashed) {
   };
 
   const pushStash = (segment, isDisplay = false) => {
+    // Fix common LLM artifact: \* is not valid LaTeX, replace with *
+    segment = segment.replace(/\\\*/g, "*");
     const token = `@@STASH${stashed.length}@@`;
     // Wrap display math in a div to ensure block rendering
     if (isDisplay) {
@@ -1016,14 +1019,38 @@ function createActions({ text, messageIndex, role }) {
     actions.appendChild(regenBtn);
   }
 
-  // Branch button - available for all messages
+  // Branch button - available for all messages (shows popover with Fork/Branch options)
   const branchBtn = document.createElement("button");
   branchBtn.type = "button";
   branchBtn.className = "action-btn action-branch";
-  branchBtn.textContent = "Branch";
+  branchBtn.textContent = "Branch ▾";
   branchBtn.title = "Create a new chat branch from this point";
   branchBtn.disabled = state.sending;
-  branchBtn.addEventListener("click", () => branchFromMessage(messageIndex));
+  branchBtn.addEventListener("click", (e) => {
+    e.stopPropagation();
+    // Remove any existing branch popover
+    document.querySelectorAll(".branch-popover").forEach(el => el.remove());
+    const popover = document.createElement("div");
+    popover.className = "branch-popover";
+    const forkOption = document.createElement("button");
+    forkOption.type = "button";
+    forkOption.className = "branch-popover-option";
+    forkOption.textContent = "Fork";
+    forkOption.title = "Independent copy (no tree link)";
+    forkOption.addEventListener("click", (ev) => { ev.stopPropagation(); popover.remove(); branchFromMessage(messageIndex, "fork"); });
+    const branchOption = document.createElement("button");
+    branchOption.type = "button";
+    branchOption.className = "branch-popover-option";
+    branchOption.textContent = "Branch";
+    branchOption.title = "Tree-linked branch (shown under parent)";
+    branchOption.addEventListener("click", (ev) => { ev.stopPropagation(); popover.remove(); branchFromMessage(messageIndex, "branch"); });
+    popover.appendChild(forkOption);
+    popover.appendChild(branchOption);
+    branchBtn.style.position = "relative";
+    branchBtn.appendChild(popover);
+    const dismiss = (ev) => { if (!popover.contains(ev.target)) { popover.remove(); document.removeEventListener("click", dismiss); } };
+    setTimeout(() => document.addEventListener("click", dismiss), 0);
+  });
   actions.appendChild(branchBtn);
 
   const deleteBtn = document.createElement("button");
@@ -1062,20 +1089,89 @@ function renderChatMessages() {
 
   chatLog.innerHTML = "";
 
+  // For branch-type sessions, show collapsible parent history
+  const activeSession = state.sessions.find(s => s.id === state.activeSessionId);
+  const isBranchType = activeSession && activeSession.branchType === "branch" && activeSession.parentSessionId != null && activeSession.branchPoint != null;
+  let parentHistoryCount = 0;
+  let parentHistoryContainer = null;
+  if (isBranchType) {
+    parentHistoryCount = activeSession.branchPoint + 1;
+    if (parentHistoryCount > 0) {
+      const expanded = state.parentHistoryExpanded;
+
+      // Wrapper holds everything (banner + messages) so the banner can be sticky inside chatLog
+      const wrapper = document.createElement("div");
+      wrapper.className = "parent-history-wrapper";
+
+      // Collapsed: full-width banner. Expanded: small sticky collapse button.
+      if (!expanded) {
+        const banner = document.createElement("div");
+        banner.className = "parent-history-banner";
+        banner.innerHTML = `<span class="parent-history-label"><svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="9 18 15 12 9 6"></polyline></svg>${parentHistoryCount} messages from parent</span><button class="parent-history-open-parent" type="button">Open parent ↗</button>`;
+        banner.addEventListener("click", (e) => {
+          if (e.target.closest(".parent-history-open-parent")) return;
+          state.parentHistoryExpanded = true;
+          renderChatMessages();
+        });
+        banner.querySelector(".parent-history-open-parent").addEventListener("click", () => {
+          setActiveSession(activeSession.parentSessionId);
+        });
+        wrapper.appendChild(banner);
+      } else {
+        const collapseBtn = document.createElement("button");
+        collapseBtn.type = "button";
+        collapseBtn.className = "parent-history-collapse-btn";
+        collapseBtn.title = "Collapse parent history";
+        collapseBtn.innerHTML = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg> Collapse`;
+        collapseBtn.addEventListener("click", () => {
+          state.parentHistoryExpanded = false;
+          renderChatMessages();
+        });
+        wrapper.appendChild(collapseBtn);
+      }
+
+      parentHistoryContainer = document.createElement("div");
+      parentHistoryContainer.className = expanded ? "parent-history-expanded" : "parent-history-collapsed";
+      wrapper.appendChild(parentHistoryContainer);
+
+      if (expanded) {
+        const divider = document.createElement("div");
+        divider.className = "parent-history-divider";
+        divider.innerHTML = "<span>Branch starts here</span>";
+        wrapper.appendChild(divider);
+      }
+
+      chatLog.appendChild(wrapper);
+    }
+  }
+
   state.messages.forEach((msg, index) => {
+    const isParentHistory = isBranchType && index < parentHistoryCount;
+    // Temporarily redirect addMessage output for parent history
+    const originalTarget = isParentHistory && parentHistoryContainer ? parentHistoryContainer : null;
+
     if (msg.role === "user") {
       const { text, attachments } = parseUserContent(msg.content);
       const displayText = text || "Sent attachments.";
-      addMessage("user", displayText, {
+      const result = addMessage("user", displayText, {
         attachments,
         actions: { text: displayText, messageIndex: index, role: "user" },
       });
+      if (isParentHistory && parentHistoryContainer && result && result.msg) {
+        chatLog.removeChild(result.msg);
+        parentHistoryContainer.appendChild(result.msg);
+      }
     } else if (msg.role === "assistant") {
       const assistantText = extractAssistantText(msg.content);
       const msgResult = addMessage("assistant", assistantText, {
         markdown: true,
         actions: { text: assistantText, messageIndex: index, role: "assistant" },
       });
+
+      if (isParentHistory && parentHistoryContainer && msgResult && msgResult.msg) {
+        chatLog.removeChild(msgResult.msg);
+        parentHistoryContainer.appendChild(msgResult.msg);
+      }
 
       // Render inline chats for this assistant message
       if (msg.inlineChats && msgResult && msgResult.msg) {
@@ -1956,51 +2052,85 @@ function renderInlineChats(msgElement, inlineChats, messageIndex) {
     console.log("Rendering inline chat:", inlineChat.id, "indices:", inlineChat.quotedTextIndices);
     const inlineChatEl = createInlineChatElement(inlineChat, messageIndex);
 
-    // Try to find the quoted text in the rendered content
+    // Try to find the quoted text in the rendered content by matching the string
     const quotedText = inlineChat.quotedText;
     let insertionPoint = null;
 
-    // Walk through text nodes to find the quoted text
-    const walker = document.createTreeWalker(
-      textElement,
-      NodeFilter.SHOW_TEXT,
-      null,
-      false
-    );
+    if (quotedText) {
+      // Normalize the quoted text for comparison (collapse whitespace)
+      const normalize = (s) => s.replace(/\s+/g, " ").trim();
+      const normalizedQuote = normalize(quotedText);
 
-    let currentPos = 0;
-    let targetStart = inlineChat.quotedTextIndices.start;
-    let foundNode = null;
+      // Search block-level elements (p, li, div, pre, h1-h6, blockquote, table) for text match
+      const blockEls = textElement.querySelectorAll("p, li, div, pre, h1, h2, h3, h4, h5, h6, blockquote, tr");
+      let bestMatch = null;
+      let bestOverlap = 0;
 
-    while (walker.nextNode()) {
-      const node = walker.currentNode;
-      const nodeText = node.textContent;
-      const nodeLength = nodeText.length;
+      blockEls.forEach((el) => {
+        const elText = normalize(el.textContent);
+        // Check if this block contains part of the quoted text
+        if (normalizedQuote.includes(elText) || elText.includes(normalizedQuote)) {
+          const overlap = Math.min(elText.length, normalizedQuote.length);
+          if (overlap > bestOverlap) {
+            bestOverlap = overlap;
+            bestMatch = el;
+          }
+        } else {
+          // Try substring match — find the block with the largest overlap
+          const words = normalizedQuote.split(" ");
+          for (let len = words.length; len >= Math.min(3, words.length); len--) {
+            const sub = words.slice(0, len).join(" ");
+            if (elText.includes(sub) && sub.length > bestOverlap) {
+              bestOverlap = sub.length;
+              bestMatch = el;
+              break;
+            }
+          }
+        }
+      });
 
-      // Check if our target position is within this text node
-      if (currentPos <= targetStart && targetStart < currentPos + nodeLength) {
-        foundNode = node;
-        break;
+      if (bestMatch) {
+        // Walk up to a direct child of textElement if needed
+        let insertAfter = bestMatch;
+        while (insertAfter.parentElement && insertAfter.parentElement !== textElement) {
+          insertAfter = insertAfter.parentElement;
+        }
+        if (insertAfter.parentElement === textElement) {
+          textElement.insertBefore(inlineChatEl, insertAfter.nextSibling);
+          insertionPoint = insertAfter;
+        }
       }
-
-      currentPos += nodeLength;
     }
 
-    // If we found a node near the quoted text, insert after its parent element
-    if (foundNode && foundNode.parentElement) {
-      let insertAfter = foundNode.parentElement;
+    // Fallback: try positional approach using raw text indices
+    if (!insertionPoint && inlineChat.quotedTextIndices) {
+      const walker = document.createTreeWalker(textElement, NodeFilter.SHOW_TEXT, null, false);
+      let currentPos = 0;
+      const fullText = textElement.textContent || "";
+      // Map raw index to approximate DOM position proportionally
+      const ratio = fullText.length > 0 ? inlineChat.quotedTextIndices.start / (inlineChat.quotedTextIndices.start + fullText.length) : 0;
+      const targetPos = Math.floor(fullText.length * Math.min(ratio, 0.95));
+      let foundNode = null;
 
-      // Walk up to find a good insertion point (like a paragraph)
-      while (insertAfter && insertAfter !== textElement) {
-        if (insertAfter.tagName === 'P' || insertAfter.tagName === 'DIV' || insertAfter.tagName === 'LI') {
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        currentPos += node.textContent.length;
+        if (currentPos >= targetPos) {
+          foundNode = node;
           break;
         }
-        insertAfter = insertAfter.parentElement;
       }
 
-      if (insertAfter && insertAfter.parentElement) {
-        insertAfter.parentElement.insertBefore(inlineChatEl, insertAfter.nextSibling);
-        insertionPoint = insertAfter;
+      if (foundNode && foundNode.parentElement) {
+        let insertAfter = foundNode.parentElement;
+        while (insertAfter && insertAfter !== textElement) {
+          if (/^(P|DIV|LI|PRE|H[1-6]|BLOCKQUOTE|TR)$/.test(insertAfter.tagName)) break;
+          insertAfter = insertAfter.parentElement;
+        }
+        if (insertAfter && insertAfter.parentElement) {
+          insertAfter.parentElement.insertBefore(inlineChatEl, insertAfter.nextSibling);
+          insertionPoint = insertAfter;
+        }
       }
     }
 
@@ -3216,6 +3346,7 @@ function setActiveSession(id, { persist = true } = {}) {
   state.activeSessionId = id;
   state.messages = session.messages;
   state.attachments = [];
+  state.parentHistoryExpanded = false;
 
   // Mark session as read
   if (session.unread) {
@@ -3234,6 +3365,17 @@ function setActiveSession(id, { persist = true } = {}) {
 
 function renderChatList() {
   chatList.innerHTML = "";
+
+  // Build branch-tree map: parentId -> [child sessions with branchType==="branch"]
+  const branchChildrenMap = {};
+  const branchChildIds = new Set();
+  state.sessions.forEach(s => {
+    if (s.branchType === "branch" && s.parentSessionId) {
+      if (!branchChildrenMap[s.parentSessionId]) branchChildrenMap[s.parentSessionId] = [];
+      branchChildrenMap[s.parentSessionId].push(s);
+      branchChildIds.add(s.id);
+    }
+  });
 
   // Get sessions in each group
   const groupedSessionIds = new Set();
@@ -3308,18 +3450,18 @@ function renderChatList() {
     const items = document.createElement("div");
     items.className = "chat-group-items";
 
-    groupSessions.forEach((session) => {
-      const item = createChatItem(session);
-      items.appendChild(item);
+    groupSessions.filter(s => !branchChildIds.has(s.id)).forEach((session) => {
+      const el = createChatItemWithTree(session, branchChildrenMap);
+      items.appendChild(el);
     });
 
     groupEl.appendChild(items);
     chatList.appendChild(groupEl);
   });
 
-  // Get ungrouped sessions
+  // Get ungrouped sessions (exclude branch-type children)
   const ungroupedSessions = state.sessions
-    .filter(s => !groupedSessionIds.has(s.id))
+    .filter(s => !groupedSessionIds.has(s.id) && !branchChildIds.has(s.id))
     .sort((a, b) => {
       if (a.starred && !b.starred) return -1;
       if (!a.starred && b.starred) return 1;
@@ -3338,19 +3480,40 @@ function renderChatList() {
       ungroupedSection.appendChild(label);
 
       ungroupedSessions.forEach((session) => {
-        const item = createChatItem(session);
-        ungroupedSection.appendChild(item);
+        const el = createChatItemWithTree(session, branchChildrenMap);
+        ungroupedSection.appendChild(el);
       });
 
       chatList.appendChild(ungroupedSection);
     } else {
       // No groups, just render sessions directly
       ungroupedSessions.forEach((session) => {
-        const item = createChatItem(session);
-        chatList.appendChild(item);
+        const el = createChatItemWithTree(session, branchChildrenMap);
+        chatList.appendChild(el);
       });
     }
   }
+}
+
+function createChatItemWithTree(session, branchChildrenMap) {
+  const children = branchChildrenMap[session.id];
+  if (!children || children.length === 0) {
+    return createChatItem(session);
+  }
+  // Render as a tree: parent + indented children
+  const tree = document.createElement("div");
+  tree.className = "branch-tree";
+  tree.appendChild(createChatItem(session));
+  const childContainer = document.createElement("div");
+  childContainer.className = "branch-tree-children";
+  children.sort((a, b) => b.updatedAt - a.updatedAt);
+  children.forEach(child => {
+    // Recursively handle nested branches
+    const childEl = createChatItemWithTree(child, branchChildrenMap);
+    childContainer.appendChild(childEl);
+  });
+  tree.appendChild(childContainer);
+  return tree;
 }
 
 function createChatItem(session) {
@@ -3757,7 +3920,7 @@ function deleteMessageAt(index) {
   setStatus("Message deleted.");
 }
 
-function branchFromMessage(index) {
+function branchFromMessage(index, type = "fork") {
   if (state.sending) {
     setStatus("Wait for the response to finish before branching.");
     return;
@@ -3778,6 +3941,7 @@ function branchFromMessage(index) {
   newSession.messages = branchedMessages;
   newSession.parentSessionId = state.activeSessionId;
   newSession.branchPoint = index;
+  newSession.branchType = type;
 
   // Calculate token usage for branched messages (approximate)
   let tokenEstimate = 0;

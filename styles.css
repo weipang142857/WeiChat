@@ -305,6 +305,186 @@ textarea {
   flex-shrink: 0;
 }
 
+/* Branch tree styles for sidebar */
+.branch-tree {
+  position: relative;
+}
+
+.branch-tree-children {
+  margin-left: 20px;
+  border-left: 1px solid var(--border);
+  padding-left: 0;
+}
+
+.branch-tree-children > .chat-item,
+.branch-tree-children > .branch-tree > .chat-item {
+  position: relative;
+}
+
+.branch-tree-children > .chat-item::before,
+.branch-tree-children > .branch-tree > .chat-item::before {
+  content: "";
+  position: absolute;
+  left: -20px;
+  top: 50%;
+  width: 16px;
+  height: 1px;
+  background: var(--border);
+}
+
+/* Branch popover */
+.branch-popover {
+  position: absolute;
+  bottom: 100%;
+  left: 50%;
+  transform: translateX(-50%);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  padding: 4px;
+  display: flex;
+  gap: 2px;
+  z-index: 100;
+  box-shadow: 0 2px 8px rgba(0,0,0,0.2);
+  white-space: nowrap;
+}
+
+.branch-popover-option {
+  padding: 4px 10px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  border-radius: 4px;
+  font-size: 12px;
+}
+
+.branch-popover-option:hover {
+  background: var(--bg-hover);
+}
+
+/* Parent history in chat view */
+.parent-history-wrapper {
+  position: relative;
+}
+
+.parent-history-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 8px 16px;
+  margin: 0 0 4px 0;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  font-size: 13px;
+  color: var(--text-secondary);
+  cursor: pointer;
+  user-select: none;
+  transition: background 0.15s, border-color 0.15s;
+}
+
+.parent-history-banner:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent, #8b5cf6);
+}
+
+.parent-history-collapse-btn {
+  position: sticky;
+  top: 8px;
+  z-index: 10;
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding: 4px 10px;
+  margin: 0 0 4px 8px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  color: var(--text-secondary);
+  font-size: 12px;
+  cursor: pointer;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.12);
+  transition: background 0.15s, border-color 0.15s, color 0.15s;
+}
+
+.parent-history-collapse-btn:hover {
+  background: var(--bg-hover);
+  border-color: var(--accent, #8b5cf6);
+  color: var(--text);
+}
+
+.parent-history-label {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.parent-history-label svg {
+  flex-shrink: 0;
+  opacity: 0.7;
+}
+
+.parent-history-open-parent {
+  background: transparent;
+  border: none;
+  color: var(--accent, #8b5cf6);
+  padding: 2px 8px;
+  border-radius: 4px;
+  cursor: pointer;
+  font-size: 12px;
+  font-weight: 500;
+  transition: background 0.15s;
+}
+
+.parent-history-open-parent:hover {
+  background: var(--bg-hover);
+  text-decoration: underline;
+}
+
+.parent-history-collapsed {
+  display: none;
+}
+
+.parent-history-expanded {
+  border-left: 3px solid var(--accent, #8b5cf6);
+  margin-left: 4px;
+  padding-left: 12px;
+  padding-bottom: 4px;
+}
+
+.parent-history-expanded .message {
+  opacity: 0.55;
+  transition: opacity 0.15s;
+}
+
+.parent-history-expanded .message:hover {
+  opacity: 0.85;
+}
+
+/* Separator between parent history and branch messages */
+.parent-history-divider {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 12px 0;
+  font-size: 12px;
+  color: var(--text-secondary);
+  user-select: none;
+}
+
+.parent-history-divider::before,
+.parent-history-divider::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--border);
+}
+
+.parent-history-divider span {
+  white-space: nowrap;
+}
+
 .chat-item .chat-item-title {
   overflow: hidden;
   text-overflow: ellipsis;
@@ -962,6 +1142,7 @@ textarea {
 
 .inline-msg-text .katex-display .katex {
   display: inline-block;
+  white-space: nowrap;
 }
 
 .inline-msg-text.markdown h1,
