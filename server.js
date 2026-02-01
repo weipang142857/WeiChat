@@ -34,23 +34,42 @@ function serveStaticFile(filePath, res) {
 function proxyToOpenAI(req, res) {
   const parsedUrl = url.parse(req.url);
 
-  // Convert /api/* to https://api.openai.com/v1/*
-  const apiPath = parsedUrl.path.replace(/^\/api/, '/v1');
+  // Determine target from X-Base-URL header or default to OpenAI
+  const customBaseUrl = req.headers['x-base-url'];
+  let targetHost = 'api.openai.com';
+  let targetPort = 443;
+  let basePath = '/v1';
+  let targetProtocol = https;
 
-  console.log(`Proxying: ${req.method} ${apiPath}`);
+  if (customBaseUrl) {
+    try {
+      const parsed = new URL(customBaseUrl);
+      targetHost = parsed.hostname;
+      targetPort = parsed.port || (parsed.protocol === 'https:' ? 443 : 80);
+      basePath = parsed.pathname.replace(/\/$/, '') || '/v1';
+      targetProtocol = parsed.protocol === 'http:' ? http : https;
+    } catch (e) {
+      console.error('Invalid X-Base-URL:', customBaseUrl);
+    }
+  }
+
+  const apiPath = parsedUrl.path.replace(/^\/api/, basePath);
+
+  console.log(`Proxying: ${req.method} ${apiPath} -> ${targetHost}`);
+
+  // Remove internal header before forwarding
+  const forwardHeaders = { ...req.headers, host: targetHost };
+  delete forwardHeaders['x-base-url'];
 
   const options = {
-    hostname: 'api.openai.com',
-    port: 443,
+    hostname: targetHost,
+    port: targetPort,
     path: apiPath,
     method: req.method,
-    headers: {
-      ...req.headers,
-      host: 'api.openai.com',
-    },
+    headers: forwardHeaders,
   };
 
-  const proxyReq = https.request(options, (proxyRes) => {
+  const proxyReq = targetProtocol.request(options, (proxyRes) => {
     // Forward status code and headers
     res.writeHead(proxyRes.statusCode, proxyRes.headers);
 

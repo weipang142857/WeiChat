@@ -1,5 +1,6 @@
 const chatLog = document.getElementById("chatLog");
 const apiKeyInput = document.getElementById("apiKey");
+const baseUrlInput = document.getElementById("baseUrl");
 const modelInput = document.getElementById("model");
 const modelSwitcher = document.getElementById("modelSwitcher");
 const reasoningSelect = document.getElementById("reasoningEffort");
@@ -89,6 +90,7 @@ const WEB_SEARCH_KEY = "keychat.webSearch";
 const CODE_INTERPRETER_KEY = "keychat.codeInterpreter";
 const FILE_SEARCH_KEY = "keychat.fileSearch";
 const VECTOR_STORE_KEY = "keychat.vectorStore";
+const BASE_URL_KEY = "keychat.baseUrl";
 const OPFS_FILE_NAME = "weichat-history.json";
 const LINKED_STORAGE_FILE = "weichat-sessions.json";
 const IDB_NAME = "weichat-storage";
@@ -994,6 +996,16 @@ function createActions({ text, messageIndex, role }) {
   actions.dataset.messageIndex = String(messageIndex);
   actions.dataset.role = role;
 
+  if (role === "user") {
+    const editBtn = document.createElement("button");
+    editBtn.type = "button";
+    editBtn.className = "action-btn action-edit";
+    editBtn.textContent = "Edit";
+    editBtn.disabled = state.sending;
+    editBtn.addEventListener("click", () => editMessageAt(messageIndex));
+    actions.appendChild(editBtn);
+  }
+
   if (role === "assistant") {
     const copyBtn = document.createElement("button");
     copyBtn.type = "button";
@@ -1012,7 +1024,7 @@ function createActions({ text, messageIndex, role }) {
     regenBtn.type = "button";
     regenBtn.className = "action-btn action-regen";
     regenBtn.textContent = "Regenerate";
-    regenBtn.disabled = messageIndex !== getLastAssistantIndex() || state.sending;
+    regenBtn.disabled = state.sending;
     regenBtn.addEventListener("click", () => regenerateFrom(messageIndex));
 
     actions.appendChild(copyBtn);
@@ -1065,14 +1077,13 @@ function createActions({ text, messageIndex, role }) {
 }
 
 function updateActionButtons() {
-  const lastAssistantIndex = getLastAssistantIndex();
   document.querySelectorAll(".actions").forEach((actions) => {
-    const index = Number(actions.dataset.messageIndex);
     const regenBtn = actions.querySelector(".action-regen");
     const deleteBtn = actions.querySelector(".action-delete");
     const branchBtn = actions.querySelector(".action-branch");
+    const editBtn = actions.querySelector(".action-edit");
     if (regenBtn) {
-      regenBtn.disabled = state.sending || index !== lastAssistantIndex;
+      regenBtn.disabled = state.sending;
     }
     if (deleteBtn) {
       deleteBtn.disabled = state.sending;
@@ -1080,11 +1091,15 @@ function updateActionButtons() {
     if (branchBtn) {
       branchBtn.disabled = state.sending;
     }
+    if (editBtn) {
+      editBtn.disabled = state.sending;
+    }
   });
 }
 
 function renderChatMessages() {
-  // Save scroll position to check if user was at bottom
+  // Save scroll position to restore after re-render
+  const prevScrollTop = chatLog.scrollTop;
   const wasAtBottom = chatLog.scrollHeight - chatLog.scrollTop - chatLog.clientHeight < 100;
 
   chatLog.innerHTML = "";
@@ -1203,9 +1218,11 @@ function renderChatMessages() {
   updateActionButtons();
   updateTokenPill();
 
-  // Only auto-scroll if user was already at the bottom
+  // Restore scroll: if user was at bottom, stay at bottom; otherwise restore position
   if (wasAtBottom) {
     chatLog.scrollTop = chatLog.scrollHeight;
+  } else {
+    chatLog.scrollTop = prevScrollTop;
   }
 }
 
@@ -1396,7 +1413,9 @@ function normalizeInlineChats(inlineChats) {
     quotedTextIndices: chat.quotedTextIndices || { start: 0, end: 0 },
     messages: Array.isArray(chat.messages) ? chat.messages.map((msg) => {
       if (msg.role === "assistant") {
-        return { role: "assistant", content: normalizeAssistantContent(msg.content) };
+        const normalized = { role: "assistant", content: normalizeAssistantContent(msg.content) };
+        if (msg.inlineChats) normalized.inlineChats = normalizeInlineChats(msg.inlineChats);
+        return normalized;
       }
       if (msg.role === "user") {
         return { role: "user", content: normalizeUserContent(msg.content) };
@@ -1916,7 +1935,28 @@ function createInlineChatElement(inlineChat, messageIndex) {
         textEl.textContent = text;
       }
 
+      // Action buttons for inline messages (same style as main chat)
+      const inlineActions = document.createElement("div");
+      inlineActions.className = "inline-msg-actions";
+
+      if (msg.role === "user") {
+        const editBtn = document.createElement("button");
+        editBtn.type = "button";
+        editBtn.className = "action-btn action-edit";
+        editBtn.textContent = "Edit";
+        editBtn.addEventListener("click", (e) => { e.stopPropagation(); editInlineChatMessage(messageIndex, inlineChat.id, idx); });
+        inlineActions.appendChild(editBtn);
+      }
+
+      const delBtn = document.createElement("button");
+      delBtn.type = "button";
+      delBtn.className = "action-btn action-delete";
+      delBtn.textContent = "Delete";
+      delBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteInlineChatMessage(messageIndex, inlineChat.id, idx); });
+      inlineActions.appendChild(delBtn);
+
       msgEl.appendChild(textEl);
+      msgEl.appendChild(inlineActions);
       messagesContainer.appendChild(msgEl);
     });
   }
@@ -2217,24 +2257,69 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
   console.log("Assistant message placeholder added");
 
   saveSessions();
-  console.log("Sessions saved, re-rendering chat");
-  renderChatMessages();
 
-  // Find the inline chat element and messages container
+  // Add messages to DOM directly instead of full re-render (avoids scroll jump)
   const inlineChatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
   if (!inlineChatEl) return;
-
-  // Scroll to the inline chat to keep it in view
-  inlineChatEl.scrollIntoView({ behavior: "smooth", block: "center" });
 
   const messagesContainer = inlineChatEl.querySelector(".inline-chat-messages");
   if (!messagesContainer) return;
 
-  // Add pending indicator to last message
-  const lastMsg = messagesContainer.lastElementChild;
-  if (lastMsg) {
-    lastMsg.classList.add("pending");
-  }
+  // Add user message element
+  const userMsgEl = document.createElement("div");
+  userMsgEl.className = "inline-msg user";
+  userMsgEl.dataset.inlineMsgIndex = inlineChat.messages.length - 2;
+  const userTextEl = document.createElement("div");
+  userTextEl.className = "inline-msg-text";
+  userTextEl.textContent = userText;
+  const userActions = document.createElement("div");
+  userActions.className = "inline-msg-actions";
+  const userEditBtn = document.createElement("button");
+  userEditBtn.type = "button";
+  userEditBtn.className = "action-btn action-edit";
+  userEditBtn.textContent = "Edit";
+  userEditBtn.addEventListener("click", (e) => { e.stopPropagation(); editInlineChatMessage(messageIndex, inlineChatId, inlineChat.messages.length - 2); });
+  userActions.appendChild(userEditBtn);
+  const userDelBtn = document.createElement("button");
+  userDelBtn.type = "button";
+  userDelBtn.className = "action-btn action-delete";
+  userDelBtn.textContent = "Delete";
+  userDelBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteInlineChatMessage(messageIndex, inlineChatId, inlineChat.messages.length - 2); });
+  userActions.appendChild(userDelBtn);
+  userMsgEl.appendChild(userTextEl);
+  userMsgEl.appendChild(userActions);
+  messagesContainer.appendChild(userMsgEl);
+
+  // Add pending assistant message element
+  const assistantMsgEl = document.createElement("div");
+  assistantMsgEl.className = "inline-msg assistant pending";
+  assistantMsgEl.dataset.inlineMsgIndex = inlineChat.messages.length - 1;
+  const assistantTextEl = document.createElement("div");
+  assistantTextEl.className = "inline-msg-text";
+  const indicator = document.createElement("span");
+  indicator.className = "inline-thinking-indicator";
+  assistantTextEl.appendChild(indicator);
+  const thinkingSpan = document.createElement("span");
+  thinkingSpan.textContent = "Thinking...";
+  thinkingSpan.style.fontStyle = "italic";
+  thinkingSpan.style.color = "var(--muted)";
+  assistantTextEl.appendChild(thinkingSpan);
+  const assistantActions = document.createElement("div");
+  assistantActions.className = "inline-msg-actions";
+  const assistantDelBtn = document.createElement("button");
+  assistantDelBtn.type = "button";
+  assistantDelBtn.className = "action-btn action-delete";
+  assistantDelBtn.textContent = "Delete";
+  assistantDelBtn.addEventListener("click", (e) => { e.stopPropagation(); deleteInlineChatMessage(messageIndex, inlineChatId, inlineChat.messages.length - 1); });
+  assistantActions.appendChild(assistantDelBtn);
+  assistantMsgEl.appendChild(assistantTextEl);
+  assistantMsgEl.appendChild(assistantActions);
+  messagesContainer.appendChild(assistantMsgEl);
+
+  // Scroll the messages container to show the new messages
+  messagesContainer.scrollTop = messagesContainer.scrollHeight;
+
+  const lastMsg = assistantMsgEl;
 
   // Build context messages
   const inputMessages = buildInlineChatInputMessages(messageIndex, inlineChatId);
@@ -2270,10 +2355,7 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
     console.log("Fetching /api/responses...");
     const response = await fetch("/api/responses", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: getApiHeaders(apiKey),
       body: JSON.stringify(payload),
     });
 
@@ -2403,6 +2485,27 @@ function rememberKeyIfNeeded() {
   } else {
     localStorage.removeItem(STORAGE_KEY);
   }
+  // Always save base URL
+  const baseUrl = baseUrlInput.value.trim();
+  if (baseUrl) {
+    localStorage.setItem(BASE_URL_KEY, baseUrl);
+  } else {
+    localStorage.removeItem(BASE_URL_KEY);
+  }
+}
+
+function getBaseUrl() {
+  return baseUrlInput.value.trim() || "";
+}
+
+function getApiHeaders(apiKey, { json = true } = {}) {
+  const headers = {
+    Authorization: `Bearer ${apiKey}`,
+  };
+  if (json) headers["Content-Type"] = "application/json";
+  const baseUrl = getBaseUrl();
+  if (baseUrl) headers["X-Base-URL"] = baseUrl;
+  return headers;
 }
 
 function renderAttachmentList() {
@@ -2456,9 +2559,7 @@ async function uploadPdfAttachment(file, apiKey) {
 
   const response = await fetch("/api/files", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: getApiHeaders(apiKey, { json: false }),
     body: formData,
   });
 
@@ -2490,9 +2591,7 @@ async function uploadFileForSearch(file, apiKey) {
 
   const response = await fetch("/api/files", {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: getApiHeaders(apiKey, { json: false }),
     body: formData,
   });
 
@@ -2520,10 +2619,7 @@ async function uploadFileForSearch(file, apiKey) {
 async function createVectorStore(apiKey, name = "WeiChat Files") {
   const response = await fetch("/api/vector_stores", {
     method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${apiKey}`,
-    },
+    headers: getApiHeaders(apiKey),
     body: JSON.stringify({ name }),
   });
 
@@ -2541,10 +2637,7 @@ async function addFileToVectorStore(apiKey, vectorStoreId, fileId) {
     `/api/vector_stores/${vectorStoreId}/files`,
     {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: getApiHeaders(apiKey),
       body: JSON.stringify({ file_id: fileId }),
     }
   );
@@ -2568,7 +2661,7 @@ async function getOrCreateVectorStore(apiKey) {
       const response = await fetch(
         `/api/vector_stores/${vectorStoreId}`,
         {
-          headers: { Authorization: `Bearer ${apiKey}` },
+          headers: getApiHeaders(apiKey, { json: false }),
         }
       );
       if (response.ok) {
@@ -2607,7 +2700,7 @@ async function listVectorStoreFiles(apiKey, vectorStoreId) {
   const response = await fetch(
     `/api/vector_stores/${vectorStoreId}/files`,
     {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: getApiHeaders(apiKey, { json: false }),
     }
   );
 
@@ -2623,7 +2716,7 @@ async function getFileInfo(apiKey, fileId) {
   const response = await fetch(
     `/api/files/${fileId}`,
     {
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: getApiHeaders(apiKey, { json: false }),
     }
   );
 
@@ -2639,7 +2732,7 @@ async function removeFileFromVectorStore(apiKey, vectorStoreId, fileId) {
     `/api/vector_stores/${vectorStoreId}/files/${fileId}`,
     {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: getApiHeaders(apiKey, { json: false }),
     }
   );
 
@@ -2682,7 +2775,7 @@ async function deleteVectorStore(apiKey, vectorStoreId) {
     `/api/vector_stores/${vectorStoreId}`,
     {
       method: "DELETE",
-      headers: { Authorization: `Bearer ${apiKey}` },
+      headers: getApiHeaders(apiKey, { json: false }),
     }
   );
 
@@ -3131,10 +3224,7 @@ async function generateChatTitle(userMessage, apiKey) {
   try {
     const response = await fetch("/api/responses", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: getApiHeaders(apiKey),
       body: JSON.stringify({
         model: "gpt-4o-mini",
         input: [
@@ -4047,7 +4137,7 @@ async function sendAssistantResponse() {
   // Add tools if enabled
   const tools = [];
   if (webSearchToggle && webSearchToggle.checked) {
-    tools.push({ type: "web_search_preview" });
+    tools.push({ type: "web_search" });
   }
   if (codeInterpreterToggle && codeInterpreterToggle.checked) {
     tools.push({
@@ -4077,10 +4167,7 @@ async function sendAssistantResponse() {
   try {
     const response = await fetch("/api/responses", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: getApiHeaders(apiKey),
       body: JSON.stringify(payload),
     });
 
@@ -4535,22 +4622,468 @@ async function sendMessage() {
 }
 
 async function regenerateFrom(messageIndex) {
-  if (state.sending) {
-    return;
-  }
-  const lastAssistantIndex = getLastAssistantIndex();
-  if (messageIndex !== lastAssistantIndex) {
-    setStatus("Only the latest response can be regenerated.");
+  if (state.sending) return;
+  if (messageIndex < 0 || messageIndex >= state.messages.length) return;
+  const msg = state.messages[messageIndex];
+  if (!msg || msg.role !== "assistant") return;
+
+  const inputMessages = state.messages.slice(0, messageIndex).map((m) => {
+    if (m.role === "assistant") return { role: "assistant", content: normalizeAssistantContent(m.content) };
+    if (m.role === "user") return { role: "user", content: normalizeUserContent(m.content) };
+    return m;
+  });
+
+  // streamRegeneratedResponse will clear the target, stream, and save
+  await streamRegeneratedResponse(inputMessages, messageIndex);
+}
+
+async function streamRegeneratedResponse(inputMessages, targetMessageIndex) {
+  const apiKey = apiKeyInput.value.trim();
+  if (!apiKey) {
+    setStatus("Add your API key to continue.");
+    apiKeyInput.focus();
     return;
   }
 
-  const removed = state.messages.pop();
-  if (!removed || removed.role !== "assistant") {
-    return;
+  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const reasoningEffort = composerReasoning ? composerReasoning.value : "default";
+  const systemPrompt = systemPromptInput.value.trim();
+
+  // Find the DOM element for the target message
+  let targetTextEl = null;
+  const allMsgEls = chatLog.querySelectorAll(".msg");
+  for (const el of allMsgEls) {
+    const actionsEl = el.querySelector(".actions");
+    if (actionsEl && Number(actionsEl.dataset.messageIndex) === targetMessageIndex) {
+      targetTextEl = el.querySelector(".text");
+      break;
+    }
   }
 
-  renderChatMessages();
-  await sendAssistantResponse();
+  // Clear the target message content in state and show pending indicator
+  state.messages[targetMessageIndex].content = [{ type: "output_text", text: "" }];
+  let targetMsgEl = null;
+  if (targetTextEl) {
+    targetMsgEl = targetTextEl.closest(".msg");
+    if (targetMsgEl) targetMsgEl.classList.add("pending");
+    targetTextEl.classList.remove("markdown");
+    targetTextEl.textContent = "Thinking...";
+  }
+  saveSessions();
+
+  state.sending = true;
+  state.generatingSessionId = state.activeSessionId;
+  updateControls();
+  updateActionButtons();
+  setStatus("Regenerating...");
+  startTimer();
+
+  const payload = { model, input: inputMessages, stream: true };
+  if (systemPrompt) payload.instructions = systemPrompt;
+  if (reasoningEffort && reasoningEffort !== "default" && reasoningEffort !== "none") {
+    payload.reasoning = { effort: reasoningEffort };
+  }
+
+  // Add tools if enabled (match sendAssistantResponse behavior)
+  const tools = [];
+  if (webSearchToggle && webSearchToggle.checked) {
+    tools.push({ type: "web_search" });
+  }
+  if (codeInterpreterToggle && codeInterpreterToggle.checked) {
+    tools.push({ type: "code_interpreter", container: { type: "auto" } });
+  }
+  if (fileSearchToggle && fileSearchToggle.checked) {
+    try {
+      const vectorStoreId = await getOrCreateVectorStore(apiKey);
+      tools.push({ type: "file_search", vector_store_ids: [vectorStoreId] });
+    } catch (e) { /* ignore */ }
+  }
+  if (tools.length > 0) payload.tools = tools;
+
+  let assistantText = "";
+
+  try {
+    const response = await fetch("/api/responses", {
+      method: "POST",
+      headers: getApiHeaders(apiKey),
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let message = `Request failed (${response.status}).`;
+      try { const ej = JSON.parse(errorText); message = ej?.error?.message || message; } catch (_) { if (errorText) message = errorText; }
+      throw new Error(message);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    const isStream = contentType.includes("text/event-stream") && response.body;
+
+    let firstDelta = true;
+    if (isStream) {
+      await streamResponse(response, (data) => {
+        if (!data || data === "[DONE]") return;
+        let event;
+        try { event = JSON.parse(data); } catch (_) { return; }
+
+        if (event.type === "response.output_text.delta" && event.delta) {
+          if (firstDelta && targetMsgEl) {
+            targetMsgEl.classList.remove("pending");
+            firstDelta = false;
+          }
+          assistantText += event.delta;
+          if (targetTextEl) targetTextEl.textContent = assistantText;
+        } else if (event.type === "response.output_text.done") {
+          if (!assistantText && event.text) {
+            assistantText = event.text;
+            if (targetTextEl) targetTextEl.textContent = assistantText;
+          }
+        } else if (event.type === "response.failed" || event.type === "error") {
+          throw new Error(event.error?.message || "Stream error.");
+        }
+      });
+    } else {
+      const data = await response.json();
+      assistantText = extractOutputText(data);
+    }
+
+    if (targetMsgEl) targetMsgEl.classList.remove("pending");
+    assistantText = stripCitationArtifacts(assistantText);
+    if (!assistantText) throw new Error("No text output received.");
+
+    // Update the message in state
+    state.messages[targetMessageIndex].content = [{ type: "output_text", text: assistantText }];
+    const session = state.sessions.find((s) => s.id === state.activeSessionId);
+    if (session) { updateSessionMetadata(session); saveSessions(); }
+
+    // Render final markdown in-place
+    if (targetTextEl) renderMarkdownInto(targetTextEl, assistantText);
+    setStatus("Ready");
+  } catch (error) {
+    if (targetMsgEl) targetMsgEl.classList.remove("pending");
+    if (targetTextEl) {
+      targetTextEl.textContent = `Error: ${error.message}`;
+      targetTextEl.style.color = "var(--error, #ef4444)";
+    }
+    setStatus(`Regeneration failed: ${error.message}`);
+  } finally {
+    state.sending = false;
+    state.generatingSessionId = null;
+    updateControls();
+    updateActionButtons();
+    stopTimer();
+  }
+}
+
+function editMessageAt(messageIndex) {
+  if (state.sending) return;
+  const msg = state.messages[messageIndex];
+  if (!msg || msg.role !== "user") return;
+
+  const { text: currentText } = parseUserContent(msg.content);
+
+  // Find the DOM element for this message
+  const msgEls = chatLog.querySelectorAll(".msg.user");
+  let targetBubble = null;
+  for (const el of msgEls) {
+    const actionsEl = el.querySelector(".actions");
+    if (actionsEl && Number(actionsEl.dataset.messageIndex) === messageIndex) {
+      targetBubble = el.querySelector(".bubble");
+      break;
+    }
+  }
+  if (!targetBubble) return;
+
+  const textEl = targetBubble.querySelector(".text");
+  if (!textEl) return;
+
+  // Replace text with textarea
+  const originalContent = textEl.textContent;
+  const textarea = document.createElement("textarea");
+  textarea.className = "edit-textarea";
+  textarea.value = currentText;
+  textarea.rows = Math.max(3, currentText.split("\n").length);
+
+  const btnRow = document.createElement("div");
+  btnRow.className = "edit-btn-row";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "action-btn";
+  saveBtn.textContent = "Save & Regenerate";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "action-btn";
+  cancelBtn.textContent = "Cancel";
+
+  btnRow.appendChild(saveBtn);
+  btnRow.appendChild(cancelBtn);
+
+  textEl.textContent = "";
+  textEl.appendChild(textarea);
+  textEl.appendChild(btnRow);
+  textarea.focus();
+
+  cancelBtn.addEventListener("click", () => {
+    textEl.textContent = originalContent;
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    const newText = textarea.value.trim();
+    if (!newText) return;
+
+    msg.content = [{ type: "input_text", text: newText }];
+    textEl.textContent = newText;
+
+    const nextMsg = state.messages[messageIndex + 1];
+    if (nextMsg && nextMsg.role === "assistant") {
+      const inputMessages = state.messages.slice(0, messageIndex + 1).map((m) => {
+        if (m.role === "assistant") return { role: "assistant", content: normalizeAssistantContent(m.content) };
+        if (m.role === "user") return { role: "user", content: normalizeUserContent(m.content) };
+        return m;
+      });
+
+      // streamRegeneratedResponse will clear the assistant text and handle everything
+      await streamRegeneratedResponse(inputMessages, messageIndex + 1);
+    } else {
+      // No assistant message after — just save
+      saveSessions();
+    }
+  });
+}
+
+function deleteInlineChatMessage(messageIndex, inlineChatId, msgIndex) {
+  if (state.sending) return;
+  const parentMessage = state.messages[messageIndex];
+  if (!parentMessage || !parentMessage.inlineChats) return;
+
+  const inlineChat = findInlineChatRecursive(parentMessage.inlineChats, inlineChatId);
+  if (!inlineChat || !Array.isArray(inlineChat.messages)) return;
+  if (msgIndex < 0 || msgIndex >= inlineChat.messages.length) return;
+
+  const targetMsg = inlineChat.messages[msgIndex];
+
+  // Remove from DOM directly to avoid scroll reset from full re-render
+  const chatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
+  const msgEls = chatEl ? chatEl.querySelectorAll(".inline-msg") : [];
+
+  if (targetMsg.role === "user") {
+    if (msgIndex + 1 < inlineChat.messages.length && inlineChat.messages[msgIndex + 1].role === "assistant") {
+      if (msgEls[msgIndex + 1]) msgEls[msgIndex + 1].remove();
+      if (msgEls[msgIndex]) msgEls[msgIndex].remove();
+      inlineChat.messages.splice(msgIndex, 2);
+    } else {
+      if (msgEls[msgIndex]) msgEls[msgIndex].remove();
+      inlineChat.messages.splice(msgIndex, 1);
+    }
+  } else {
+    if (msgEls[msgIndex]) msgEls[msgIndex].remove();
+    inlineChat.messages.splice(msgIndex, 1);
+  }
+
+  saveSessions();
+  setStatus("Inline message deleted.");
+}
+
+function editInlineChatMessage(messageIndex, inlineChatId, msgIndex) {
+  if (state.sending) return;
+  const parentMessage = state.messages[messageIndex];
+  if (!parentMessage || !parentMessage.inlineChats) return;
+
+  const inlineChat = findInlineChatRecursive(parentMessage.inlineChats, inlineChatId);
+  if (!inlineChat || !Array.isArray(inlineChat.messages)) return;
+
+  const msg = inlineChat.messages[msgIndex];
+  if (!msg || msg.role !== "user") return;
+
+  const { text: currentText } = parseUserContent(msg.content);
+
+  // Find the DOM element
+  const chatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
+  if (!chatEl) return;
+  const msgEls = chatEl.querySelectorAll(".inline-msg");
+  const targetEl = msgEls[msgIndex];
+  if (!targetEl) return;
+
+  const textEl = targetEl.querySelector(".inline-msg-text");
+  if (!textEl) return;
+
+  const originalContent = textEl.textContent;
+  const textarea = document.createElement("textarea");
+  textarea.className = "edit-textarea";
+  textarea.value = currentText;
+  textarea.rows = Math.max(2, currentText.split("\n").length);
+
+  const btnRow = document.createElement("div");
+  btnRow.className = "edit-btn-row";
+
+  const saveBtn = document.createElement("button");
+  saveBtn.type = "button";
+  saveBtn.className = "action-btn";
+  saveBtn.textContent = "Save & Regenerate";
+
+  const cancelBtn = document.createElement("button");
+  cancelBtn.type = "button";
+  cancelBtn.className = "action-btn";
+  cancelBtn.textContent = "Cancel";
+
+  btnRow.appendChild(saveBtn);
+  btnRow.appendChild(cancelBtn);
+
+  textEl.textContent = "";
+  textEl.appendChild(textarea);
+  textEl.appendChild(btnRow);
+  textarea.focus();
+
+  cancelBtn.addEventListener("click", () => {
+    textEl.textContent = originalContent;
+  });
+
+  saveBtn.addEventListener("click", async () => {
+    const newText = textarea.value.trim();
+    if (!newText) return;
+
+    msg.content = [{ type: "input_text", text: newText }];
+    textEl.textContent = newText;
+
+    const nextMsg = inlineChat.messages[msgIndex + 1];
+    if (nextMsg && nextMsg.role === "assistant") {
+      nextMsg.content = [{ type: "output_text", text: "" }];
+
+      // Show thinking indicator in the next assistant message
+      const nextMsgEl = chatEl.querySelectorAll(".inline-msg")[msgIndex + 1];
+      if (nextMsgEl) {
+        nextMsgEl.classList.add("pending");
+        const nextTextEl = nextMsgEl.querySelector(".inline-msg-text");
+        if (nextTextEl) {
+          nextTextEl.innerHTML = "";
+          const indicator = document.createElement("span");
+          indicator.className = "inline-thinking-indicator";
+          nextTextEl.appendChild(indicator);
+          const thinkingSpan = document.createElement("span");
+          thinkingSpan.textContent = "Thinking...";
+          thinkingSpan.style.fontStyle = "italic";
+          thinkingSpan.style.color = "var(--muted)";
+          nextTextEl.appendChild(thinkingSpan);
+        }
+      }
+
+      saveSessions();
+
+      // Build inline chat input messages up to the edited point
+      const inputMessages = buildInlineChatInputMessages(messageIndex, inlineChatId);
+      const trimmedInput = [];
+      for (const m of inputMessages) {
+        trimmedInput.push(m);
+        if (trimmedInput.length >= (messageIndex + 1) + (msgIndex + 1)) break;
+      }
+
+      await streamInlineRegeneratedResponse(trimmedInput, messageIndex, inlineChatId, msgIndex + 1);
+    } else {
+      saveSessions();
+    }
+  });
+}
+
+async function streamInlineRegeneratedResponse(inputMessages, messageIndex, inlineChatId, inlineMsgIndex) {
+  const apiKey = apiKeyInput.value.trim();
+  if (!apiKey) return;
+
+  const parentMessage = state.messages[messageIndex];
+  if (!parentMessage) return;
+  const inlineChat = findInlineChatRecursive(parentMessage.inlineChats, inlineChatId);
+  if (!inlineChat) return;
+
+  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const reasoning = composerReasoning ? composerReasoning.value : "default";
+  const systemPrompt = systemPromptInput.value.trim();
+
+  const payload = { model, input: inputMessages, stream: true };
+  if (systemPrompt) payload.instructions = systemPrompt;
+  if (reasoning && reasoning !== "default" && reasoning !== "none") {
+    payload.reasoning = { effort: reasoning };
+  }
+
+  // Find DOM elements before fetch
+  const chatEl = document.querySelector(`[data-inline-chat-id="${inlineChatId}"]`);
+  const msgEls = chatEl ? chatEl.querySelectorAll(".inline-msg") : [];
+  const targetEl = msgEls[inlineMsgIndex];
+  const textEl = targetEl ? targetEl.querySelector(".inline-msg-text") : null;
+
+  // Show thinking indicator
+  if (targetEl) {
+    targetEl.classList.add("pending");
+    if (textEl) {
+      textEl.innerHTML = "";
+      const indicator = document.createElement("span");
+      indicator.className = "inline-thinking-indicator";
+      textEl.appendChild(indicator);
+      const thinkingSpan = document.createElement("span");
+      thinkingSpan.textContent = "Thinking...";
+      thinkingSpan.style.fontStyle = "italic";
+      thinkingSpan.style.color = "var(--muted)";
+      textEl.appendChild(thinkingSpan);
+    }
+  }
+
+  let assistantText = "";
+  let firstDelta = true;
+
+  try {
+    const response = await fetch("/api/responses", {
+      method: "POST",
+      headers: getApiHeaders(apiKey),
+      body: JSON.stringify(payload),
+    });
+
+    if (!response.ok) {
+      const errorText = await response.text();
+      let message = `Request failed (${response.status}).`;
+      try { const ej = JSON.parse(errorText); message = ej?.error?.message || message; } catch (_) { if (errorText) message = errorText; }
+      throw new Error(message);
+    }
+
+    const contentType = response.headers.get("content-type") || "";
+    const isStream = contentType.includes("text/event-stream") && response.body;
+
+    if (isStream) {
+      await streamResponse(response, (data) => {
+        if (!data || data === "[DONE]") return;
+        let event;
+        try { event = JSON.parse(data); } catch (_) { return; }
+
+        if (event.type === "response.output_text.delta" && event.delta) {
+          if (firstDelta && targetEl) {
+            targetEl.classList.remove("pending");
+            firstDelta = false;
+          }
+          assistantText += event.delta;
+          if (textEl) renderMarkdownInto(textEl, assistantText);
+        } else if (event.type === "response.output_text.done" && !assistantText && event.text) {
+          assistantText = event.text;
+          if (targetEl) targetEl.classList.remove("pending");
+          if (textEl) renderMarkdownInto(textEl, assistantText);
+        }
+      });
+    } else {
+      const data = await response.json();
+      assistantText = data?.output?.[0]?.content?.[0]?.text || "";
+    }
+
+    if (targetEl) targetEl.classList.remove("pending");
+    inlineChat.messages[inlineMsgIndex].content = [{ type: "output_text", text: assistantText }];
+    inlineChat.updatedAt = Date.now();
+    saveSessions();
+    if (textEl) renderMarkdownInto(textEl, assistantText);
+  } catch (error) {
+    if (targetEl) targetEl.classList.remove("pending");
+    if (textEl) {
+      textEl.innerHTML = "";
+      textEl.textContent = `Error: ${error.message}`;
+    }
+    setStatus(`Inline regeneration failed: ${error.message}`);
+  }
 }
 
 function clearCurrentChat() {
@@ -4596,9 +5129,15 @@ async function initialize() {
   const savedTheme = localStorage.getItem(THEME_KEY) || "system";
   const savedActiveSession = localStorage.getItem(ACTIVE_SESSION_KEY);
 
+  const savedBaseUrl = localStorage.getItem(BASE_URL_KEY);
+
   if (savedKey) {
     apiKeyInput.value = savedKey;
     rememberKeyInput.checked = true;
+  }
+
+  if (savedBaseUrl && baseUrlInput) {
+    baseUrlInput.value = savedBaseUrl;
   }
 
   if (savedModel && modelInput) {
@@ -4739,6 +5278,11 @@ fileInput.addEventListener("change", () => {
 });
 
 rememberKeyInput.addEventListener("change", rememberKeyIfNeeded);
+baseUrlInput.addEventListener("change", () => {
+  const val = baseUrlInput.value.trim();
+  if (val) localStorage.setItem(BASE_URL_KEY, val);
+  else localStorage.removeItem(BASE_URL_KEY);
+});
 
 if (modelInput) {
   modelInput.addEventListener("change", () => {
@@ -5524,9 +6068,7 @@ async function downloadFileFromAPI(containerId, fileId, filename) {
 
     const response = await fetch(url, {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-      },
+      headers: getApiHeaders(apiKey, { json: false }),
     });
 
     if (!response.ok) {
