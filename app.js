@@ -108,9 +108,7 @@ const state = {
   messages: [],
   attachments: [],
   loadingAttachments: 0,
-  sending: false,
-  generatingSessionId: null,
-  pendingMessage: null, // Stores the pending message state for the generating session
+  generatingSessions: new Map(), // Map<sessionId, { pendingMessage, abortController? }>
   contextSessionId: null,
   contextGroupId: null,
   linkedDirHandle: null,
@@ -485,19 +483,28 @@ function stopTimer() {
   timerStart = null;
 }
 
+function isSessionGenerating(sessionId) {
+  return state.generatingSessions.has(sessionId);
+}
+
+function getGeneratingState(sessionId) {
+  return state.generatingSessions.get(sessionId);
+}
+
 function updateControls() {
-  const busy = state.sending || state.loadingAttachments > 0;
+  const isActiveSessionBusy = isSessionGenerating(state.activeSessionId);
+  const busy = isActiveSessionBusy || state.loadingAttachments > 0;
   sendBtn.disabled = busy;
-  messageInput.disabled = state.sending;
-  fileInput.disabled = state.sending;
-  apiKeyInput.disabled = state.sending;
-  if (modelInput) modelInput.disabled = state.sending;
-  if (reasoningSelect) reasoningSelect.disabled = state.sending;
-  if (composerModel) composerModel.disabled = state.sending;
-  if (composerReasoning) composerReasoning.disabled = state.sending;
-  systemPromptInput.disabled = state.sending;
-  if (clearBtn) clearBtn.disabled = state.sending;
-  newChatBtn.disabled = state.sending;
+  messageInput.disabled = isActiveSessionBusy;
+  fileInput.disabled = isActiveSessionBusy;
+  apiKeyInput.disabled = isActiveSessionBusy;
+  if (modelInput) modelInput.disabled = isActiveSessionBusy;
+  if (reasoningSelect) reasoningSelect.disabled = isActiveSessionBusy;
+  if (composerModel) composerModel.disabled = isActiveSessionBusy;
+  if (composerReasoning) composerReasoning.disabled = isActiveSessionBusy;
+  systemPromptInput.disabled = isActiveSessionBusy;
+  if (clearBtn) clearBtn.disabled = isActiveSessionBusy;
+  newChatBtn.disabled = false;
 }
 
 function createThinkingPanel() {
@@ -1001,7 +1008,7 @@ function createActions({ text, messageIndex, role }) {
     editBtn.type = "button";
     editBtn.className = "action-btn action-edit";
     editBtn.textContent = "Edit";
-    editBtn.disabled = state.sending;
+    editBtn.disabled = isSessionGenerating(state.activeSessionId);
     editBtn.addEventListener("click", () => editMessageAt(messageIndex));
     actions.appendChild(editBtn);
   }
@@ -1024,7 +1031,7 @@ function createActions({ text, messageIndex, role }) {
     regenBtn.type = "button";
     regenBtn.className = "action-btn action-regen";
     regenBtn.textContent = "Regenerate";
-    regenBtn.disabled = state.sending;
+    regenBtn.disabled = isSessionGenerating(state.activeSessionId);
     regenBtn.addEventListener("click", () => regenerateFrom(messageIndex));
 
     actions.appendChild(copyBtn);
@@ -1037,7 +1044,7 @@ function createActions({ text, messageIndex, role }) {
   branchBtn.className = "action-btn action-branch";
   branchBtn.textContent = "Branch ▾";
   branchBtn.title = "Create a new chat branch from this point";
-  branchBtn.disabled = state.sending;
+  branchBtn.disabled = isSessionGenerating(state.activeSessionId);
   branchBtn.addEventListener("click", (e) => {
     e.stopPropagation();
     // Remove any existing branch popover
@@ -1069,7 +1076,7 @@ function createActions({ text, messageIndex, role }) {
   deleteBtn.type = "button";
   deleteBtn.className = "action-btn action-delete";
   deleteBtn.textContent = "Delete";
-  deleteBtn.disabled = state.sending;
+  deleteBtn.disabled = isSessionGenerating(state.activeSessionId);
   deleteBtn.addEventListener("click", () => deleteMessageAt(messageIndex));
   actions.appendChild(deleteBtn);
 
@@ -1083,16 +1090,16 @@ function updateActionButtons() {
     const branchBtn = actions.querySelector(".action-branch");
     const editBtn = actions.querySelector(".action-edit");
     if (regenBtn) {
-      regenBtn.disabled = state.sending;
+      regenBtn.disabled = isSessionGenerating(state.activeSessionId);
     }
     if (deleteBtn) {
-      deleteBtn.disabled = state.sending;
+      deleteBtn.disabled = isSessionGenerating(state.activeSessionId);
     }
     if (branchBtn) {
-      branchBtn.disabled = state.sending;
+      branchBtn.disabled = isSessionGenerating(state.activeSessionId);
     }
     if (editBtn) {
-      editBtn.disabled = state.sending;
+      editBtn.disabled = isSessionGenerating(state.activeSessionId);
     }
   });
 }
@@ -1196,23 +1203,25 @@ function renderChatMessages() {
     }
   });
 
-  // If we're viewing the generating session, restore the pending message
-  if (state.generatingSessionId === state.activeSessionId && state.pendingMessage) {
-    const reasoningEnabled = state.pendingMessage.thinkingPanel !== null;
-    const pending = addMessage("assistant", state.pendingMessage.assistantText || state.pendingMessage.refusalText || "", {
+  // If we're viewing a generating session, restore the pending message
+  const genState = getGeneratingState(state.activeSessionId);
+  if (genState && genState.pendingMessage) {
+    const pendingMessage = genState.pendingMessage;
+    const reasoningEnabled = pendingMessage.thinkingPanel !== null;
+    const pending = addMessage("assistant", pendingMessage.assistantText || pendingMessage.refusalText || "", {
       pending: true,
       thinking: reasoningEnabled
     });
 
     // Restore thinking text if present
-    if (reasoningEnabled && state.pendingMessage.thinkingText && pending.thinking) {
+    if (reasoningEnabled && pendingMessage.thinkingText && pending.thinking) {
       pending.thinking.details.open = true;
-      pending.thinking.summaryText.textContent = state.pendingMessage.thinkingText;
+      pending.thinking.summaryText.textContent = pendingMessage.thinkingText;
     }
 
     // Update the stored reference to the new DOM elements
-    state.pendingMessage.pending = pending;
-    state.pendingMessage.thinkingPanel = pending.thinking;
+    pendingMessage.pending = pending;
+    pendingMessage.thinkingPanel = pending.thinking;
   }
 
   updateActionButtons();
@@ -1788,10 +1797,129 @@ function createInlineChatInput(messageIndex, inlineChatId) {
   const wrapper = document.createElement("div");
   wrapper.className = "inline-chat-input-wrapper";
 
+  // Attachment list for this inline chat
+  const attachmentList = document.createElement("div");
+  attachmentList.className = "inline-attachment-list";
+
+  // Track attachments for this inline chat input
+  let inlineAttachments = [];
+
+  const renderInlineAttachments = () => {
+    attachmentList.innerHTML = "";
+    inlineAttachments.forEach((attachment, index) => {
+      const chip = document.createElement("div");
+      chip.className = `inline-attachment-chip${attachment.uploading ? " loading" : ""}`;
+
+      const name = document.createElement("span");
+      name.textContent = attachment.name;
+      chip.appendChild(name);
+
+      if (attachment.uploading) {
+        const status = document.createElement("span");
+        status.className = "inline-attachment-status";
+        status.textContent = "...";
+        chip.appendChild(status);
+      }
+
+      const removeBtn = document.createElement("button");
+      removeBtn.type = "button";
+      removeBtn.className = "inline-attachment-remove";
+      removeBtn.textContent = "×";
+      removeBtn.disabled = attachment.uploading;
+      removeBtn.addEventListener("click", (e) => {
+        e.stopPropagation();
+        inlineAttachments.splice(index, 1);
+        renderInlineAttachments();
+      });
+      chip.appendChild(removeBtn);
+
+      attachmentList.appendChild(chip);
+    });
+  };
+
+  const handleInlineFile = async (file) => {
+    if (!file) return;
+
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey) {
+      setStatus("Add your API key before uploading files.");
+      return;
+    }
+
+    const lowerName = file.name.toLowerCase();
+    const isPdf = file.type === "application/pdf" || lowerName.endsWith(".pdf");
+    const imageTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
+    const imageExts = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
+    const isImage = imageTypes.has(file.type) || imageExts.some((ext) => lowerName.endsWith(ext));
+
+    if (!isPdf && !isImage) {
+      setStatus("Inline chats support images and PDFs only.");
+      return;
+    }
+
+    if (isImage) {
+      // Read image as data URL
+      const reader = new FileReader();
+      reader.onload = () => {
+        inlineAttachments.push({
+          kind: "image",
+          name: file.name,
+          imageUrl: reader.result,
+        });
+        renderInlineAttachments();
+      };
+      reader.readAsDataURL(file);
+    } else if (isPdf) {
+      // Upload PDF
+      const attachment = {
+        kind: "pdf",
+        name: file.name,
+        uploading: true,
+        fileId: null,
+      };
+      inlineAttachments.push(attachment);
+      renderInlineAttachments();
+
+      try {
+        const fileId = await uploadPdfAttachment(file, apiKey);
+        attachment.fileId = fileId;
+        attachment.uploading = false;
+        renderInlineAttachments();
+        setStatus("PDF attached.");
+      } catch (error) {
+        const idx = inlineAttachments.indexOf(attachment);
+        if (idx >= 0) inlineAttachments.splice(idx, 1);
+        renderInlineAttachments();
+        setStatus(`PDF upload failed: ${error.message}`);
+      }
+    }
+  };
+
+  const inputRow = document.createElement("div");
+  inputRow.className = "inline-chat-input-row";
+
   const textarea = document.createElement("textarea");
   textarea.className = "inline-chat-input";
   textarea.placeholder = "Ask a follow-up question...";
   textarea.rows = 2;
+
+  const fileBtn = document.createElement("button");
+  fileBtn.type = "button";
+  fileBtn.className = "inline-chat-file-btn";
+  fileBtn.title = "Attach file";
+  fileBtn.innerHTML = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.44 11.05l-9.19 9.19a6 6 0 01-8.49-8.49l9.19-9.19a4 4 0 015.66 5.66l-9.2 9.19a2 2 0 01-2.83-2.83l8.49-8.48"></path></svg>`;
+
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = "image/*,.pdf";
+  fileInput.style.display = "none";
+  fileInput.addEventListener("change", () => {
+    if (fileInput.files && fileInput.files[0]) {
+      handleInlineFile(fileInput.files[0]);
+      fileInput.value = "";
+    }
+  });
+  fileBtn.addEventListener("click", () => fileInput.click());
 
   const sendBtn = document.createElement("button");
   sendBtn.className = "inline-chat-send-btn";
@@ -1802,12 +1930,18 @@ function createInlineChatInput(messageIndex, inlineChatId) {
     const text = textarea.value.trim();
     console.log("Text to send:", text);
 
-    if (!text) {
-      console.log("No text, returning");
+    // Check if any attachments are still uploading
+    if (inlineAttachments.some(a => a.uploading)) {
+      setStatus("Wait for attachments to finish uploading.");
       return;
     }
 
-    if (state.sending) {
+    if (!text && inlineAttachments.length === 0) {
+      console.log("No text or attachments, returning");
+      return;
+    }
+
+    if (isSessionGenerating(state.activeSessionId)) {
       console.log("Already sending, returning");
       return;
     }
@@ -1815,10 +1949,13 @@ function createInlineChatInput(messageIndex, inlineChatId) {
     console.log("Disabling input and calling sendInlineChatMessage");
     textarea.disabled = true;
     sendBtn.disabled = true;
+    fileBtn.disabled = true;
 
     try {
-      await sendInlineChatMessage(messageIndex, inlineChatId, text);
+      await sendInlineChatMessage(messageIndex, inlineChatId, text, inlineAttachments);
       textarea.value = "";
+      inlineAttachments = [];
+      renderInlineAttachments();
       console.log("Message sent successfully");
     } catch (error) {
       console.error("Inline chat error:", error);
@@ -1826,6 +1963,7 @@ function createInlineChatInput(messageIndex, inlineChatId) {
     } finally {
       textarea.disabled = false;
       sendBtn.disabled = false;
+      fileBtn.disabled = false;
       textarea.focus();
     }
   };
@@ -1839,8 +1977,13 @@ function createInlineChatInput(messageIndex, inlineChatId) {
     }
   });
 
-  wrapper.appendChild(textarea);
-  wrapper.appendChild(sendBtn);
+  inputRow.appendChild(fileInput);
+  inputRow.appendChild(fileBtn);
+  inputRow.appendChild(textarea);
+  inputRow.appendChild(sendBtn);
+
+  wrapper.appendChild(attachmentList);
+  wrapper.appendChild(inputRow);
 
   return wrapper;
 }
@@ -2204,9 +2347,9 @@ function findInlineChatRecursive(inlineChats, targetId) {
   return null;
 }
 
-async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
+async function sendInlineChatMessage(messageIndex, inlineChatId, userText, attachments = []) {
   console.log("=== sendInlineChatMessage START ===");
-  console.log("messageIndex:", messageIndex, "inlineChatId:", inlineChatId, "userText:", userText);
+  console.log("messageIndex:", messageIndex, "inlineChatId:", inlineChatId, "userText:", userText, "attachments:", attachments.length);
 
   const apiKey = apiKeyInput.value.trim();
   console.log("API key present:", !!apiKey);
@@ -2232,17 +2375,32 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText) {
     return;
   }
 
-  // Add user message to inline chat
+  // Build user message content
+  const userContent = [];
+
   // For the first message, include the quoted text as context
   let messageText = userText;
-  if (inlineChat.messages.length === 0) {
+  if (inlineChat.messages.length === 0 && userText) {
     messageText = `Regarding this part of your previous response:\n"${inlineChat.quotedText}"\n\n${userText}`;
     console.log("First message in inline chat, adding quoted context");
   }
 
+  if (messageText) {
+    userContent.push({ type: "input_text", text: messageText });
+  }
+
+  // Add attachments to content
+  attachments.forEach((attachment) => {
+    if (attachment.kind === "image" && attachment.imageUrl) {
+      userContent.push({ type: "input_image", image_url: attachment.imageUrl });
+    } else if (attachment.kind === "pdf" && attachment.fileId) {
+      userContent.push({ type: "input_file", file_id: attachment.fileId });
+    }
+  });
+
   const userMessage = {
     role: "user",
-    content: [{ type: "input_text", text: messageText }],
+    content: userContent,
   };
   inlineChat.messages.push(userMessage);
   inlineChat.updatedAt = Date.now();
@@ -3004,6 +3162,13 @@ function addAttachment(file) {
 
   const lowerName = file.name.toLowerCase();
   const isPdf = file.type === "application/pdf" || lowerName.endsWith(".pdf");
+  const officeTypes = new Set([
+    "application/vnd.openxmlformats-officedocument.presentationml.presentation", // .pptx
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document",   // .docx
+    "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"          // .xlsx
+  ]);
+  const officeExts = [".pptx", ".docx", ".xlsx"];
+  const isOfficeFile = officeTypes.has(file.type) || officeExts.some((ext) => lowerName.endsWith(ext));
   const imageTypes = new Set(["image/png", "image/jpeg", "image/webp", "image/gif"]);
   const imageExts = [".png", ".jpg", ".jpeg", ".webp", ".gif"];
   const isImage =
@@ -3021,8 +3186,8 @@ function addAttachment(file) {
   ];
   const isCodeFile = codeExtensions.some(ext => lowerName.endsWith(ext));
 
-  if (!isPdf && !isImage && !isCodeFile) {
-    setStatus("Unsupported file type. Use images, PDFs, or code/text files.");
+  if (!isPdf && !isOfficeFile && !isImage && !isCodeFile) {
+    setStatus("Unsupported file type. Use images, PDFs, Office docs, or code/text files.");
     return;
   }
 
@@ -3136,6 +3301,66 @@ function addAttachment(file) {
           state.attachments.splice(index, 1);
         }
         setStatus(`PDF upload failed: ${error.message}`);
+      })
+      .finally(() => {
+        state.loadingAttachments = Math.max(0, state.loadingAttachments - 1);
+        updateControls();
+        renderAttachmentList();
+      });
+
+    return;
+  }
+
+  // Office files (pptx, docx, xlsx) are only supported via file search, not direct attachment
+  if (isOfficeFile) {
+    const apiKey = apiKeyInput.value.trim();
+    if (!apiKey) {
+      setStatus("Add your API key before uploading Office documents.");
+      return;
+    }
+
+    if (!fileSearchToggle || !fileSearchToggle.checked) {
+      setStatus("Enable 'Files' toggle to upload Office documents (they require file search).");
+      return;
+    }
+
+    const extMatch = lowerName.match(/\.(pptx|docx|xlsx)$/);
+    const ext = extMatch ? extMatch[1] : "document";
+    const attachment = {
+      kind: "office",
+      name: file.name || `document.${ext}`,
+      uploading: true,
+      fileId: null,
+    };
+
+    state.attachments.push(attachment);
+    state.loadingAttachments += 1;
+    updateControls();
+    renderAttachmentList();
+    setStatus(`Uploading ${ext.toUpperCase()}...`);
+
+    uploadFileForSearch(file, apiKey)
+      .then(async (fileId) => {
+        attachment.fileId = fileId;
+        attachment.uploading = false;
+        trackUploadedFile(fileId, file.name, file.size);
+
+        try {
+          setStatus("Adding file to search index...");
+          const vectorStoreId = await getOrCreateVectorStore(apiKey);
+          await addFileToVectorStore(apiKey, vectorStoreId, fileId);
+          attachment.inVectorStore = true;
+          setStatus(`${ext.toUpperCase()} ready for search.`);
+        } catch (error) {
+          setStatus(`File uploaded but search setup failed: ${error.message}`);
+        }
+      })
+      .catch((error) => {
+        const index = state.attachments.indexOf(attachment);
+        if (index >= 0) {
+          state.attachments.splice(index, 1);
+        }
+        setStatus(`${ext.toUpperCase()} upload failed: ${error.message}`);
       })
       .finally(() => {
         state.loadingAttachments = Math.max(0, state.loadingAttachments - 1);
@@ -3448,6 +3673,7 @@ function setActiveSession(id, { persist = true } = {}) {
   messageInput.value = "";
   renderChatList();
   renderChatMessages();
+  updateControls();
   if (persist) {
     saveSessions();
   }
@@ -3637,7 +3863,7 @@ function createChatItem(session) {
   item.appendChild(titleSpan);
 
   // Add generating indicator if this session is generating a response
-  if (state.generatingSessionId === session.id) {
+  if (isSessionGenerating(session.id)) {
     const generatingIndicator = document.createElement("span");
     generatingIndicator.className = "chat-item-generating";
     generatingIndicator.title = "Generating response...";
@@ -3932,7 +4158,7 @@ function initSidebarResize() {
 }
 
 function renameSession(sessionId) {
-  if (state.sending) {
+  if (isSessionGenerating(state.activeSessionId)) {
     setStatus("Wait for the response to finish before renaming.");
     return;
   }
@@ -3959,7 +4185,7 @@ function renameSession(sessionId) {
 }
 
 function deleteSession(sessionId) {
-  if (state.sending) {
+  if (isSessionGenerating(state.activeSessionId)) {
     setStatus("Wait for the response to finish before deleting.");
     return;
   }
@@ -3988,7 +4214,7 @@ function deleteSession(sessionId) {
 }
 
 function deleteMessageAt(index) {
-  if (state.sending) {
+  if (isSessionGenerating(state.activeSessionId)) {
     setStatus("Wait for the response to finish before deleting.");
     return;
   }
@@ -4011,7 +4237,7 @@ function deleteMessageAt(index) {
 }
 
 function branchFromMessage(index, type = "fork") {
-  if (state.sending) {
+  if (isSessionGenerating(state.activeSessionId)) {
     setStatus("Wait for the response to finish before branching.");
     return;
   }
@@ -4105,15 +4331,17 @@ async function sendAssistantResponse() {
 
   addNote("queued", "Queued");
   setStatus("Thinking...");
-  state.sending = true;
-  state.generatingSessionId = state.activeSessionId;
-  state.pendingMessage = {
+
+  // Capture the session ID for this request - all response handling uses this
+  const generatingSessionId = state.activeSessionId;
+  const pendingMessage = {
     assistantText: "",
     refusalText: "",
     thinkingText: "",
     pending: pending,
     thinkingPanel: thinkingPanel,
   };
+  state.generatingSessions.set(generatingSessionId, { pendingMessage });
   updateControls();
   updateActionButtons();
   renderChatList();
@@ -4212,33 +4440,33 @@ async function sendAssistantResponse() {
             addNote("progress", "Working");
             break;
           case "response.reasoning_text.delta":
-            if (state.pendingMessage && event.delta) {
-              state.pendingMessage.thinkingText += event.delta;
-              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.thinkingPanel) {
-                state.pendingMessage.thinkingPanel.details.open = true;
-                state.pendingMessage.thinkingPanel.summaryText.textContent += event.delta;
+            if (pendingMessage && event.delta) {
+              pendingMessage.thinkingText += event.delta;
+              if (state.activeSessionId === generatingSessionId && pendingMessage.thinkingPanel) {
+                pendingMessage.thinkingPanel.details.open = true;
+                pendingMessage.thinkingPanel.summaryText.textContent += event.delta;
               }
             }
             break;
           case "response.reasoning_summary_text.delta":
-            if (state.pendingMessage && event.delta) {
-              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.thinkingPanel) {
-                state.pendingMessage.thinkingPanel.details.open = true;
+            if (pendingMessage && event.delta) {
+              if (state.activeSessionId === generatingSessionId && pendingMessage.thinkingPanel) {
+                pendingMessage.thinkingPanel.details.open = true;
                 // Clear reasoning text and show summary instead
-                if (!state.pendingMessage.thinkingPanel.showingSummary) {
-                  state.pendingMessage.thinkingPanel.summaryText.textContent = "";
-                  state.pendingMessage.thinkingPanel.showingSummary = true;
+                if (!pendingMessage.thinkingPanel.showingSummary) {
+                  pendingMessage.thinkingPanel.summaryText.textContent = "";
+                  pendingMessage.thinkingPanel.showingSummary = true;
                 }
-                state.pendingMessage.thinkingPanel.summaryText.textContent += event.delta;
+                pendingMessage.thinkingPanel.summaryText.textContent += event.delta;
               }
             }
             break;
           case "response.reasoning_summary_part.added":
           case "response.reasoning_summary_part.delta":
-            if (state.pendingMessage && event.part?.text) {
-              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.thinkingPanel) {
-                state.pendingMessage.thinkingPanel.details.open = true;
-                state.pendingMessage.thinkingPanel.summaryText.textContent += event.part.text;
+            if (pendingMessage && event.part?.text) {
+              if (state.activeSessionId === generatingSessionId && pendingMessage.thinkingPanel) {
+                pendingMessage.thinkingPanel.details.open = true;
+                pendingMessage.thinkingPanel.summaryText.textContent += event.part.text;
               }
             }
             break;
@@ -4246,11 +4474,11 @@ async function sendAssistantResponse() {
             addNote("draft", "Drafting response");
             assistantText += event.delta || "";
             // Update the stored pending message state
-            if (state.pendingMessage) {
-              state.pendingMessage.assistantText = assistantText;
+            if (pendingMessage) {
+              pendingMessage.assistantText = assistantText;
               // Update UI if we're viewing the generating session
-              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
-                state.pendingMessage.pending.text.textContent = assistantText;
+              if (state.activeSessionId === generatingSessionId && pendingMessage.pending) {
+                pendingMessage.pending.text.textContent = assistantText;
                 setStatus("Streaming response...");
               }
             }
@@ -4258,20 +4486,20 @@ async function sendAssistantResponse() {
           case "response.output_text.done":
             if (!assistantText && event.text) {
               assistantText = event.text;
-              if (state.pendingMessage) {
-                state.pendingMessage.assistantText = assistantText;
-                if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
-                  state.pendingMessage.pending.text.textContent = assistantText;
+              if (pendingMessage) {
+                pendingMessage.assistantText = assistantText;
+                if (state.activeSessionId === generatingSessionId && pendingMessage.pending) {
+                  pendingMessage.pending.text.textContent = assistantText;
                 }
               }
             }
             break;
           case "response.refusal.delta":
             refusalText += event.delta || "";
-            if (state.pendingMessage) {
-              state.pendingMessage.refusalText = refusalText;
-              if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
-                state.pendingMessage.pending.text.textContent = refusalText;
+            if (pendingMessage) {
+              pendingMessage.refusalText = refusalText;
+              if (state.activeSessionId === generatingSessionId && pendingMessage.pending) {
+                pendingMessage.pending.text.textContent = refusalText;
                 setStatus("Refusal in progress...");
               }
             }
@@ -4279,10 +4507,10 @@ async function sendAssistantResponse() {
           case "response.refusal.done":
             if (event.refusal) {
               refusalText = event.refusal;
-              if (state.pendingMessage) {
-                state.pendingMessage.refusalText = refusalText;
-                if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
-                  state.pendingMessage.pending.text.textContent = refusalText;
+              if (pendingMessage) {
+                pendingMessage.refusalText = refusalText;
+                if (state.activeSessionId === generatingSessionId && pendingMessage.pending) {
+                  pendingMessage.pending.text.textContent = refusalText;
                 }
               }
             }
@@ -4304,10 +4532,10 @@ async function sendAssistantResponse() {
 
                         if (newText !== content.text) {
                           assistantText = assistantText.replace(content.text, newText);
-                          if (state.pendingMessage) {
-                            state.pendingMessage.assistantText = assistantText;
-                            if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
-                              state.pendingMessage.pending.text.textContent = assistantText;
+                          if (pendingMessage) {
+                            pendingMessage.assistantText = assistantText;
+                            if (state.activeSessionId === generatingSessionId && pendingMessage.pending) {
+                              pendingMessage.pending.text.textContent = assistantText;
                             }
                           }
                         }
@@ -4336,10 +4564,10 @@ async function sendAssistantResponse() {
                               const containerId = annotation.container_id || "";
                               assistantText = assistantText.replace(sandboxPattern, `[📎 Download ${annotation.filename}](downloadfile://${containerId}/${annotation.file_id}/${annotation.filename})`);
 
-                              if (state.pendingMessage) {
-                                state.pendingMessage.assistantText = assistantText;
-                                if (state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
-                                  state.pendingMessage.pending.text.textContent = assistantText;
+                              if (pendingMessage) {
+                                pendingMessage.assistantText = assistantText;
+                                if (state.activeSessionId === generatingSessionId && pendingMessage.pending) {
+                                  pendingMessage.pending.text.textContent = assistantText;
                                 }
                               }
                             }
@@ -4383,9 +4611,9 @@ async function sendAssistantResponse() {
                   console.log("File output from code interpreter:", output);
                   const filename = output.filename || "file";
                   assistantText += `\n\n[📎 Download ${filename}](downloadfile://${output.file_id}/${filename})\n\n`;
-                  if (state.pendingMessage && state.activeSessionId === state.generatingSessionId && state.pendingMessage.pending) {
-                    state.pendingMessage.assistantText = assistantText;
-                    state.pendingMessage.pending.text.textContent = assistantText;
+                  if (pendingMessage && state.activeSessionId === generatingSessionId && pendingMessage.pending) {
+                    pendingMessage.assistantText = assistantText;
+                    pendingMessage.pending.text.textContent = assistantText;
                   }
                 }
               });
@@ -4440,7 +4668,7 @@ async function sendAssistantResponse() {
     }
 
     // Find the session where the message was originally sent
-    const generatingSession = state.sessions.find((item) => item.id === state.generatingSessionId);
+    const generatingSession = state.sessions.find((item) => item.id === generatingSessionId);
 
     if (generatingSession) {
       // Add the assistant response to the generating session
@@ -4453,12 +4681,12 @@ async function sendAssistantResponse() {
       updateSessionMetadata(generatingSession);
 
       // Mark as unread if user switched to a different session
-      if (state.activeSessionId !== state.generatingSessionId) {
+      if (state.activeSessionId !== generatingSessionId) {
         generatingSession.unread = true;
       }
 
       // Update state.messages if we're still viewing the same session
-      if (state.activeSessionId === state.generatingSessionId) {
+      if (state.activeSessionId === generatingSessionId) {
         state.messages = generatingSession.messages;
       }
 
@@ -4468,14 +4696,14 @@ async function sendAssistantResponse() {
     updateTokenPill();
 
     // Only update the DOM if we're still viewing the generating session
-    if (state.activeSessionId === state.generatingSessionId && state.pendingMessage && state.pendingMessage.pending) {
-      state.pendingMessage.pending.msg.classList.remove("pending");
-      renderMarkdownInto(state.pendingMessage.pending.text, assistantText);
+    if (state.activeSessionId === generatingSessionId && pendingMessage && pendingMessage.pending) {
+      pendingMessage.pending.msg.classList.remove("pending");
+      renderMarkdownInto(pendingMessage.pending.text, assistantText);
 
       maybeCollapseThinking();
 
-      if (state.pendingMessage.pending.actions) {
-        state.pendingMessage.pending.actions.remove();
+      if (pendingMessage.pending.actions) {
+        pendingMessage.pending.actions.remove();
       }
       const assistantIndex = state.messages.length - 1;
       const actions = createActions({
@@ -4483,7 +4711,7 @@ async function sendAssistantResponse() {
         messageIndex: assistantIndex,
         role: "assistant",
       });
-      state.pendingMessage.pending.msg.querySelector(".bubble")?.appendChild(actions);
+      pendingMessage.pending.msg.querySelector(".bubble")?.appendChild(actions);
       updateActionButtons();
       setStatus("Ready");
     } else {
@@ -4492,17 +4720,15 @@ async function sendAssistantResponse() {
     }
   } catch (error) {
     // Only update DOM if we're still viewing the generating session
-    if (state.activeSessionId === state.generatingSessionId && state.pendingMessage && state.pendingMessage.pending) {
-      state.pendingMessage.pending.msg.classList.remove("pending");
-      state.pendingMessage.pending.msg.classList.add("error");
-      state.pendingMessage.pending.text.textContent = `Error: ${error.message}`;
+    if (state.activeSessionId === generatingSessionId && pendingMessage && pendingMessage.pending) {
+      pendingMessage.pending.msg.classList.remove("pending");
+      pendingMessage.pending.msg.classList.add("error");
+      pendingMessage.pending.text.textContent = `Error: ${error.message}`;
       addNote("error", "Failed");
     }
     setStatus("Something went wrong. Check your API key and model.");
   } finally {
-    state.sending = false;
-    state.generatingSessionId = null;
-    state.pendingMessage = null;
+    state.generatingSessions.delete(generatingSessionId);
     updateControls();
     updateActionButtons();
     renderChatList();
@@ -4570,6 +4796,7 @@ async function sendMessage() {
     if (attachment.kind === "image") {
       userContent.push({ type: "input_image", image_url: attachment.imageUrl });
     } else if (attachment.kind === "pdf") {
+      // PDFs can be attached directly
       if (attachment.fileId) {
         userContent.push({
           type: "input_file",
@@ -4583,6 +4810,7 @@ async function sendMessage() {
         });
       }
     }
+    // Office files (pptx, docx, xlsx) are accessed via file search, not direct attachment
   });
 
   state.messages.push({ role: "user", content: userContent });
@@ -4622,7 +4850,7 @@ async function sendMessage() {
 }
 
 async function regenerateFrom(messageIndex) {
-  if (state.sending) return;
+  if (isSessionGenerating(state.activeSessionId)) return;
   if (messageIndex < 0 || messageIndex >= state.messages.length) return;
   const msg = state.messages[messageIndex];
   if (!msg || msg.role !== "assistant") return;
@@ -4671,8 +4899,8 @@ async function streamRegeneratedResponse(inputMessages, targetMessageIndex) {
   }
   saveSessions();
 
-  state.sending = true;
-  state.generatingSessionId = state.activeSessionId;
+  const generatingSessionId = state.activeSessionId;
+  state.generatingSessions.set(generatingSessionId, { pendingMessage: null });
   updateControls();
   updateActionButtons();
   setStatus("Regenerating...");
@@ -4767,8 +4995,7 @@ async function streamRegeneratedResponse(inputMessages, targetMessageIndex) {
     }
     setStatus(`Regeneration failed: ${error.message}`);
   } finally {
-    state.sending = false;
-    state.generatingSessionId = null;
+    state.generatingSessions.delete(generatingSessionId);
     updateControls();
     updateActionButtons();
     stopTimer();
@@ -4776,7 +5003,7 @@ async function streamRegeneratedResponse(inputMessages, targetMessageIndex) {
 }
 
 function editMessageAt(messageIndex) {
-  if (state.sending) return;
+  if (isSessionGenerating(state.activeSessionId)) return;
   const msg = state.messages[messageIndex];
   if (!msg || msg.role !== "user") return;
 
@@ -4854,7 +5081,7 @@ function editMessageAt(messageIndex) {
 }
 
 function deleteInlineChatMessage(messageIndex, inlineChatId, msgIndex) {
-  if (state.sending) return;
+  if (isSessionGenerating(state.activeSessionId)) return;
   const parentMessage = state.messages[messageIndex];
   if (!parentMessage || !parentMessage.inlineChats) return;
 
@@ -4887,7 +5114,7 @@ function deleteInlineChatMessage(messageIndex, inlineChatId, msgIndex) {
 }
 
 function editInlineChatMessage(messageIndex, inlineChatId, msgIndex) {
-  if (state.sending) return;
+  if (isSessionGenerating(state.activeSessionId)) return;
   const parentMessage = state.messages[messageIndex];
   if (!parentMessage || !parentMessage.inlineChats) return;
 
@@ -5087,7 +5314,7 @@ async function streamInlineRegeneratedResponse(inputMessages, messageIndex, inli
 }
 
 function clearCurrentChat() {
-  if (state.sending) {
+  if (isSessionGenerating(state.activeSessionId)) {
     return;
   }
   state.messages = [];
@@ -5332,7 +5559,7 @@ chatLog.addEventListener("mouseup", (event) => {
   console.log("Mouseup event triggered");
 
   // Don't show popup if currently sending
-  if (state.sending) {
+  if (isSessionGenerating(state.activeSessionId)) {
     hideSelectionPopup();
     return;
   }
