@@ -2091,6 +2091,23 @@ function createInlineChatElement(inlineChat, messageIndex) {
         inlineActions.appendChild(editBtn);
       }
 
+      if (msg.role === "assistant") {
+        const copyBtn = document.createElement("button");
+        copyBtn.type = "button";
+        copyBtn.className = "action-btn";
+        copyBtn.textContent = "Copy";
+        copyBtn.addEventListener("click", async (e) => {
+          e.stopPropagation();
+          try {
+            await navigator.clipboard.writeText(msg.content || "");
+            setStatus("Copied to clipboard.");
+          } catch (error) {
+            setStatus("Copy failed.");
+          }
+        });
+        inlineActions.appendChild(copyBtn);
+      }
+
       const delBtn = document.createElement("button");
       delBtn.type = "button";
       delBtn.className = "action-btn action-delete";
@@ -2464,6 +2481,21 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText, attac
   assistantTextEl.appendChild(thinkingSpan);
   const assistantActions = document.createElement("div");
   assistantActions.className = "inline-msg-actions";
+  const assistantCopyBtn = document.createElement("button");
+  assistantCopyBtn.type = "button";
+  assistantCopyBtn.className = "action-btn";
+  assistantCopyBtn.textContent = "Copy";
+  assistantCopyBtn.addEventListener("click", async (e) => {
+    e.stopPropagation();
+    try {
+      const textContent = assistantTextEl.textContent || "";
+      await navigator.clipboard.writeText(textContent);
+      setStatus("Copied to clipboard.");
+    } catch (error) {
+      setStatus("Copy failed.");
+    }
+  });
+  assistantActions.appendChild(assistantCopyBtn);
   const assistantDelBtn = document.createElement("button");
   assistantDelBtn.type = "button";
   assistantDelBtn.className = "action-btn action-delete";
