@@ -2517,7 +2517,7 @@ async function sendInlineChatMessage(messageIndex, inlineChatId, userText, attac
   console.log("Context includes:", inputMessages.map(m => `${m.role}: ${JSON.stringify(m.content).substring(0, 50)}...`));
 
   // Prepare API payload
-  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const model = composerModel ? composerModel.value : "gpt-5.4";
   const reasoning = composerReasoning ? composerReasoning.value : "default";
   const systemPrompt = systemPromptInput.value || "You are a helpful assistant.";
 
@@ -4324,7 +4324,7 @@ function branchFromMessage(index, type = "fork") {
 
 async function sendAssistantResponse() {
   const apiKey = apiKeyInput.value.trim();
-  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const model = composerModel ? composerModel.value : "gpt-5.4";
   const reasoningEffort = composerReasoning ? composerReasoning.value : "default";
 
   if (!apiKey) {
@@ -4805,7 +4805,7 @@ async function sendMessage() {
   ensureSession();
   rememberKeyIfNeeded();
 
-  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const model = composerModel ? composerModel.value : "gpt-5.4";
   const reasoning = composerReasoning ? composerReasoning.value : "default";
   localStorage.setItem(MODEL_KEY, model);
   localStorage.setItem(SYSTEM_KEY, systemPromptInput.value);
@@ -4905,7 +4905,7 @@ async function streamRegeneratedResponse(inputMessages, targetMessageIndex) {
     return;
   }
 
-  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const model = composerModel ? composerModel.value : "gpt-5.4";
   const reasoningEffort = composerReasoning ? composerReasoning.value : "default";
   const systemPrompt = systemPromptInput.value.trim();
 
@@ -5254,7 +5254,7 @@ async function streamInlineRegeneratedResponse(inputMessages, messageIndex, inli
   const inlineChat = findInlineChatRecursive(parentMessage.inlineChats, inlineChatId);
   if (!inlineChat) return;
 
-  const model = composerModel ? composerModel.value : "gpt-5.2";
+  const model = composerModel ? composerModel.value : "gpt-5.4";
   const reasoning = composerReasoning ? composerReasoning.value : "default";
   const systemPrompt = systemPromptInput.value.trim();
 
@@ -5874,7 +5874,7 @@ if (modelSwitcher) {
 
 // Composer model and reasoning selects
 if (composerModel) {
-  const savedModel = localStorage.getItem(MODEL_KEY) || "gpt-5.2";
+  const savedModel = localStorage.getItem(MODEL_KEY) || "gpt-5.4";
   // Ensure option exists
   const exists = Array.from(composerModel.options).some(opt => opt.value === savedModel);
   if (!exists) {
